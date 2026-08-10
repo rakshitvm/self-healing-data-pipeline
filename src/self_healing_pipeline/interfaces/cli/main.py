@@ -10,9 +10,12 @@ Production pipeline wired here:
     ErrorRouter
         -> LangGraphCsvRepairAgent (RepairAgent adapter)
             -> run_audited_csv_repair(...)
-                -> csv_repair_workflow (the canonical LangGraph StateGraph)
+                -> csv_repair_workflow (the canonical LangGraph StateGraph,
+                   traced automatically via MLflow LangChain/OpenAI autolog —
+                   see `enable_tracing`; zero changes to the graph itself)
                 -> RepairAuditStore (PostgreSQL)
-                -> RepairRunTracker (MLflow, best-effort)
+                -> RepairRunTracker (MLflow Runs, best-effort)
+                -> RepairTraceTracer (MLflow Traces, best-effort)
 
 `build_error_router` takes every port as an explicit argument (pure
 dependency injection, easily tested with fakes). `build_production_error_router`
@@ -55,6 +58,7 @@ from self_healing_pipeline.domain.interfaces.services.csv_repair_proposal_port i
     CsvRepairProposalPort,
 )
 from self_healing_pipeline.domain.interfaces.services.repair_run_tracker import RepairRunTracker
+from self_healing_pipeline.domain.interfaces.services.repair_trace_tracer import RepairTraceTracer
 from self_healing_pipeline.domain.value_objects.failure_class import FailureClass
 from self_healing_pipeline.infrastructure.agents.langgraph_csv_repair_agent import (
     LangGraphCsvRepairAgent,
@@ -72,6 +76,10 @@ from self_healing_pipeline.infrastructure.llm.proposal_provider_factory import (
 from self_healing_pipeline.infrastructure.mlflow.mlflow_repair_run_tracker import (
     MlflowRepairRunTracker,
 )
+from self_healing_pipeline.infrastructure.mlflow.mlflow_repair_trace_tracer import (
+    MlflowRepairTraceTracer,
+)
+from self_healing_pipeline.infrastructure.mlflow.tracing_setup import enable_tracing, flush_traces
 from self_healing_pipeline.infrastructure.persistence.postgres.repair_audit_store import (
     PostgresRepairAuditStore,
 )
@@ -92,6 +100,7 @@ def build_error_router(
     llm_port: CsvRepairProposalPort,
     audit_store: RepairAuditStore,
     run_tracker: RepairRunTracker | None = None,
+    trace_tracer: RepairTraceTracer | None = None,
 ) -> ErrorRouter:
     """Wire the real Tier 1 pipeline from injected ports.
 
@@ -100,7 +109,9 @@ def build_error_router(
     with fakes in tests.
     """
     graph = build_csv_repair_workflow(detector=detector, executor=executor, llm_port=llm_port)
-    agent = LangGraphCsvRepairAgent(graph, audit_store=audit_store, run_tracker=run_tracker)
+    agent = LangGraphCsvRepairAgent(
+        graph, audit_store=audit_store, run_tracker=run_tracker, trace_tracer=trace_tracer
+    )
 
     router = ErrorRouter()
     router.register(CsvRepairError, agent)
@@ -114,14 +125,20 @@ def build_production_error_router() -> ErrorRouter:
     `LLM_PROVIDER` (`groq` for temporary development, or `azure_openai`).
     This is the only function in the codebase that constructs live
     infrastructure for the CLI; everything else is injected.
+
+    Also enables MLflow tracing (best-effort — `enable_tracing`'s return
+    value is intentionally not checked here: tracing is optional
+    observability, never a startup precondition).
     """
     settings = get_settings()
+    enable_tracing(settings.mlflow)
     return build_error_router(
         detector=LocalCsvFailureDetector(),
         executor=PandasCsvRepairExecutor(),
         llm_port=build_proposal_provider(),
         audit_store=PostgresRepairAuditStore.from_settings(settings.database),
         run_tracker=MlflowRepairRunTracker.from_settings(settings.mlflow),
+        trace_tracer=MlflowRepairTraceTracer(),
     )
 
 
@@ -156,7 +173,14 @@ def repair(file_path: str) -> None:
     )
 
     router = build_production_error_router()
-    result = router.route(error)
+    try:
+        result = router.route(error)
+    finally:
+        # Bounded, best-effort: mitigates an empirically-verified risk
+        # (Ticket 013) where MLflow's default trace flush can hang the
+        # process for a long time if the tracking server is unreachable.
+        # The repair result above is already computed and unaffected.
+        flush_traces()
 
     click.echo(f"failure_class: {failure_class.value}")
     click.echo(f"success: {result.success}")

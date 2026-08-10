@@ -14,6 +14,9 @@ from self_healing_pipeline.domain.interfaces.services.repair_run_tracker import 
     RepairRunTracker,
     TrackingOutcome,
 )
+from self_healing_pipeline.domain.interfaces.services.repair_trace_tracer import (
+    RepairTraceTracer,
+)
 
 __all__ = [
     "CsvExecutionOutcome",
@@ -21,5 +24,6 @@ __all__ = [
     "CsvRepairExecutor",
     "CsvRepairProposalPort",
     "RepairRunTracker",
+    "RepairTraceTracer",
     "TrackingOutcome",
 ]

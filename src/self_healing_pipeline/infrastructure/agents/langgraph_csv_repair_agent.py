@@ -36,6 +36,7 @@ from self_healing_pipeline.domain.interfaces.repositories.repair_audit_store imp
     RepairAuditStore,
 )
 from self_healing_pipeline.domain.interfaces.services.repair_run_tracker import RepairRunTracker
+from self_healing_pipeline.domain.interfaces.services.repair_trace_tracer import RepairTraceTracer
 from self_healing_pipeline.domain.value_objects.repair_result import RepairResult
 
 
@@ -48,12 +49,14 @@ class LangGraphCsvRepairAgent:
         *,
         audit_store: RepairAuditStore,
         run_tracker: RepairRunTracker | None = None,
+        trace_tracer: RepairTraceTracer | None = None,
         source: str = "local",
         max_retries: int = DEFAULT_MAX_RETRIES,
     ) -> None:
         self._graph = graph
         self._audit_store = audit_store
         self._run_tracker = run_tracker
+        self._trace_tracer = trace_tracer
         self._source = source
         self._max_retries = max_retries
 
@@ -74,6 +77,7 @@ class LangGraphCsvRepairAgent:
             audit_store=self._audit_store,
             source=self._source,
             run_tracker=self._run_tracker,
+            trace_tracer=self._trace_tracer,
         )
 
         if final_state["repair_result"] is not None:

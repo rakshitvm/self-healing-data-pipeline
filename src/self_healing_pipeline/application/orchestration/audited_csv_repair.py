@@ -39,6 +39,34 @@ node. `token_usage` is left unpopulated: `AzureOpenAIProposalProvider`
 fixed `CsvRepairProposalPort.propose() -> dict[str, Any]` contract, and
 per Ticket 010's constraints that provider's request/response behavior
 must not change to obtain it.
+
+Ticket 013 adds an optional `trace_tracer` (`RepairTraceTracer`, e.g.
+`MlflowRepairTraceTracer`) alongside `run_tracker` — a second, separate
+MLflow concern (traces/spans, not Runs; see `repair_trace_tracer.py` for
+why these are kept as distinct abstractions). When provided, the whole
+`graph.invoke()` call is wrapped in one best-effort MLflow trace via
+`trace_tracer.trace_invocation`, which *guarantees* `graph.invoke` is
+still called exactly once regardless of tracing outcome. Real per-node
+child spans, the TOOL span, and the LLM span come entirely from MLflow's
+own LangChain/OpenAI autologging (enabled once, at the composition root,
+via `enable_tracing` — see `tracing_setup.py`), not from anything in
+this module — this module only opens the outer trace and threads the
+resulting `trace_id` into `payload["mlflow_trace_id"]` on every event,
+mirroring exactly how `mlflow_run_id`/`mlflow_tracking_error` are
+already threaded through. Omitting `trace_tracer` reproduces Ticket
+010's behavior exactly.
+
+Asymmetry with `run_tracker`, worth being explicit about: `run_tracker`
+is only ever invoked *after* `failure_class` is known (so it is
+genuinely skipped for healthy files), whereas `trace_tracer` must wrap
+`graph.invoke()` itself — diagnosis happens *inside* the graph, so
+there is no way to know in advance whether a given invocation will turn
+out healthy. This is harmless: MLflow's own autologging would trace the
+invocation regardless, with or without this wrapper, and the "zero LLM
+calls on the healthy path" guarantee is unaffected (`propose`, the only
+node that ever calls an LLM, is still never reached). What stays exactly
+the same either way: a healthy file still creates no audit episode, no
+event, and no trace tag.
 """
 
 import time
@@ -56,6 +84,7 @@ from self_healing_pipeline.domain.interfaces.repositories.repair_audit_store imp
     RepairAuditStore,
 )
 from self_healing_pipeline.domain.interfaces.services.repair_run_tracker import RepairRunTracker
+from self_healing_pipeline.domain.interfaces.services.repair_trace_tracer import RepairTraceTracer
 from self_healing_pipeline.domain.value_objects.failure_class import FailureClass
 from self_healing_pipeline.domain.value_objects.pipeline_context import PipelineContext
 from self_healing_pipeline.domain.value_objects.pipeline_status import RepairEpisodeStatus
@@ -69,12 +98,17 @@ def _tracking_payload(tracking_error: str | None) -> dict[str, Any]:
     return {"mlflow_tracking_error": tracking_error} if tracking_error is not None else {}
 
 
+def _trace_payload(trace_id: str | None) -> dict[str, Any]:
+    return {"mlflow_trace_id": trace_id} if trace_id is not None else {}
+
+
 class _TrackingContext(TypedDict):
-    """The per-episode tracking info threaded onto every recorded event."""
+    """The per-episode tracking/tracing info threaded onto every recorded event."""
 
     mlflow_run_id: str | None
     latency_ms: int | None
     tracking_error: str | None
+    trace_id: str | None
 
 
 def _propose_event(
@@ -83,6 +117,7 @@ def _propose_event(
     mlflow_run_id: str | None,
     latency_ms: int | None,
     tracking_error: str | None,
+    trace_id: str | None,
 ) -> RepairEvent:
     return RepairEvent(
         episode_id=state["episode_id"],
@@ -91,7 +126,11 @@ def _propose_event(
         error_type=_error_type(state["failure_class"]),
         mlflow_run_id=mlflow_run_id,
         latency_ms=latency_ms,
-        payload={"raw_proposal": state["proposed_params"], **_tracking_payload(tracking_error)},
+        payload={
+            "raw_proposal": state["proposed_params"],
+            **_tracking_payload(tracking_error),
+            **_trace_payload(trace_id),
+        },
     )
 
 
@@ -101,6 +140,7 @@ def _validate_event(
     mlflow_run_id: str | None,
     latency_ms: int | None,
     tracking_error: str | None,
+    trace_id: str | None,
 ) -> RepairEvent:
     validated = state["validated_params"]
     return RepairEvent(
@@ -114,6 +154,7 @@ def _validate_event(
         payload={
             "validation_errors": state["validation_errors"],
             **_tracking_payload(tracking_error),
+            **_trace_payload(trace_id),
         },
     )
 
@@ -124,6 +165,7 @@ def _apply_event(
     mlflow_run_id: str | None,
     latency_ms: int | None,
     tracking_error: str | None,
+    trace_id: str | None,
 ) -> RepairEvent:
     result = state["repair_result"]
     assert result is not None  # only called when repair_result was set
@@ -141,6 +183,7 @@ def _apply_event(
             "message": result.message,
             "validation_errors": result.validation_errors,
             **_tracking_payload(tracking_error),
+            **_trace_payload(trace_id),
         },
     )
 
@@ -151,6 +194,7 @@ def _reverify_event(
     mlflow_run_id: str | None,
     latency_ms: int | None,
     tracking_error: str | None,
+    trace_id: str | None,
 ) -> RepairEvent:
     outcome = state["verification_result"]
     assert outcome is not None  # only called when verification_result was set
@@ -166,6 +210,7 @@ def _reverify_event(
             "message": outcome.message,
             "validation_errors": outcome.validation_errors,
             **_tracking_payload(tracking_error),
+            **_trace_payload(trace_id),
         },
     )
 
@@ -177,22 +222,33 @@ def run_audited_csv_repair(
     audit_store: RepairAuditStore,
     source: str = "local",
     run_tracker: RepairRunTracker | None = None,
+    trace_tracer: RepairTraceTracer | None = None,
 ) -> CsvRepairWorkflowState:
     """Run `graph` to completion, then record an audit trail if a repair was attempted.
 
     Returns the workflow's final state unchanged. Persistence failures
     are not caught: if `audit_store` raises, this function raises too.
-    `run_tracker` is optional and strictly best-effort (see module
-    docstring); omitting it reproduces Ticket 009's audit-only behavior
-    exactly.
+    `run_tracker` and `trace_tracer` are optional and strictly
+    best-effort (see module docstring); omitting both reproduces Ticket
+    009's audit-only behavior exactly.
     """
     started_at = time.perf_counter()
-    final_state = cast(CsvRepairWorkflowState, graph.invoke(initial_state))
+    if trace_tracer is not None:
+        final_state, trace_id = trace_tracer.trace_invocation(
+            lambda: graph.invoke(initial_state), episode_id=initial_state["episode_id"]
+        )
+        final_state = cast(CsvRepairWorkflowState, final_state)
+    else:
+        final_state = cast(CsvRepairWorkflowState, graph.invoke(initial_state))
+        trace_id = None
     elapsed_ms = int((time.perf_counter() - started_at) * 1000)
     failure_class = final_state["failure_class"]
 
     if failure_class is None:
         return final_state  # healthy path: no repair attempt, no audit episode, no tracking
+
+    if trace_id is not None and trace_tracer is not None:
+        trace_tracer.tag_trace(trace_id, {"failure_class": failure_class.value})
 
     mlflow_run_id: str | None = None
     tracking_error: str | None = None
@@ -232,6 +288,7 @@ def run_audited_csv_repair(
         "mlflow_run_id": mlflow_run_id,
         "latency_ms": elapsed_ms,
         "tracking_error": tracking_error,
+        "trace_id": trace_id,
     }
     if final_state["proposed_params"] is not None:
         audit_store.record_event(_propose_event(final_state, **event_kwargs))
