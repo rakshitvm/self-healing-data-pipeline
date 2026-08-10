@@ -1,0 +1,64 @@
+# Local development infrastructure for the Tier 1 Self-Healing Data
+# Pipeline demo: PostgreSQL (the audit-of-record for repair_episodes /
+# repair_events) and a self-hosted MLflow Tracking Server backed by that
+# same PostgreSQL instance. These are LOCAL DEVELOPMENT credentials and
+# defaults only — see the security note in .env.example.
+#
+# Hostname note: the host application (running outside Docker) connects
+# to PostgreSQL and MLflow via "localhost" and their published ports
+# (DB_PORT / MLFLOW_PORT). The MLflow *container* connects to PostgreSQL
+# using the Docker Compose service name "postgres" instead — container
+# networking has its own internal DNS, where "localhost" would mean the
+# MLflow container itself, not the postgres container. That's why the
+# MLflow service's --backend-store-uri below uses "postgres:5432", not
+# "${DB_HOST}:${DB_PORT}".
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: self-healing-pipeline-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-self_healing_pipeline}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-self_healing_pipeline}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  mlflow:
+    build:
+      context: ./docker
+      dockerfile: mlflow.Dockerfile
+    container_name: self-healing-pipeline-mlflow
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${MLFLOW_PORT:-5000}:5000"
+    volumes:
+      - mlflow_artifacts:/mlartifacts
+    command: >
+      mlflow server
+      --backend-store-uri postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/${DB_NAME:-self_healing_pipeline}
+      --default-artifact-root /mlartifacts
+      --host 0.0.0.0
+      --port 5000
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  postgres_data:
+  mlflow_artifacts:
