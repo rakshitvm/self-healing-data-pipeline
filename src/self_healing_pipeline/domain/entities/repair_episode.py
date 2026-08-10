@@ -34,5 +34,6 @@ class RepairEpisode(BaseModel):
     status: RepairEpisodeStatus = RepairEpisodeStatus.PENDING
     started_at: datetime = Field(default_factory=_utcnow)
     last_active_at: datetime = Field(default_factory=_utcnow)
+    completed_at: datetime | None = None
     is_active: bool = True
     agent_last_used: str | None = None

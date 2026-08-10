@@ -7,6 +7,7 @@ infrastructure or repair-execution logic itself.
 
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -26,12 +27,15 @@ class RepairEvent(BaseModel):
 
     event_id: UUID = Field(default_factory=uuid4)
     episode_id: UUID
+    node: str | None = None
+    status: str | None = None
     error_type: str
     handler_used: str | None = None
     applied: bool = False
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     diff: str | None = None
     prescription: CsvRepairParams | None = None
+    payload: dict[str, Any] | None = None
     latency_ms: int | None = Field(default=None, ge=0)
     token_usage: int | None = Field(default=None, ge=0)
     cost: Decimal | None = Field(default=None, ge=0)
