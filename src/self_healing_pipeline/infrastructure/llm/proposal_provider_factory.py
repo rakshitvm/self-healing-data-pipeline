@@ -1,14 +1,14 @@
 """Provider selection for `CsvRepairProposalPort`.
 
-The smallest possible selection mechanism: reads `LLM_PROVIDER` directly
-from the environment (not from `Settings`, since Groq's and Azure's
-settings must each remain independently optional — see `GroqSettings`)
-and returns the matching concrete provider. LangGraph and every other
-caller depend only on `CsvRepairProposalPort`; nothing is coupled to
-either concrete provider — this factory is the one place that chooses.
+Reads `LLM_PROVIDER` via `LLMProviderSettings` (not from `Settings`, since
+Groq's and Azure's settings must each remain independently optional — see
+`GroqSettings`), the same pydantic-settings `env_file=".env"` pattern used
+by every other settings section, so `.env`'s `LLM_PROVIDER` is honored
+without requiring the shell to separately export it. Returns the matching
+concrete provider. LangGraph and every other caller depend only on
+`CsvRepairProposalPort`; nothing is coupled to either concrete provider —
+this factory is the one place that chooses.
 """
-
-import os
 
 from self_healing_pipeline.domain.interfaces.services.csv_repair_proposal_port import (
     CsvRepairProposalPort,
@@ -16,6 +16,7 @@ from self_healing_pipeline.domain.interfaces.services.csv_repair_proposal_port i
 from self_healing_pipeline.infrastructure.config.settings import (
     load_azure_openai_settings,
     load_groq_settings,
+    load_llm_provider_settings,
 )
 from self_healing_pipeline.infrastructure.llm.azure_openai_proposal_provider import (
     AzureOpenAIProposalProvider,
@@ -30,13 +31,13 @@ _AZURE_OPENAI = "azure_openai"
 def build_proposal_provider(provider_name: str | None = None) -> CsvRepairProposalPort:
     """Build the `CsvRepairProposalPort` implementation selected by `LLM_PROVIDER`.
 
-    `provider_name` overrides the environment for testing; production
-    callers should omit it and rely on the `LLM_PROVIDER` env var
-    (defaulting to `"azure_openai"`, the specification's intended
-    production provider).
+    `provider_name` overrides configuration for testing; production
+    callers should omit it and rely on `LLM_PROVIDER` (via `.env` or the
+    process environment, defaulting to `"azure_openai"`, the
+    specification's intended production provider).
     """
-    raw_selection = provider_name if provider_name is not None else os.environ.get(
-        "LLM_PROVIDER", DEFAULT_LLM_PROVIDER
+    raw_selection = (
+        provider_name if provider_name is not None else load_llm_provider_settings().provider
     )
     selected = raw_selection.strip().lower()
 

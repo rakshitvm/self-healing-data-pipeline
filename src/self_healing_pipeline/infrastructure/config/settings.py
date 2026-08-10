@@ -76,6 +76,24 @@ class GroqSettings(BaseSettings):
     )
 
 
+class LLMProviderSettings(BaseSettings):
+    """Selects which `CsvRepairProposalPort` implementation to construct.
+
+    Deliberately NOT part of the aggregate `Settings` root below, for the
+    same reason as `GroqSettings`/`AzureOpenAISettings`: loaded on demand
+    by the provider factory. Uses the same pydantic-settings
+    `env_file=".env"` mechanism as every other settings section (see
+    module docstring) instead of raw `os.environ`, so `.env`'s
+    `LLM_PROVIDER` is honored without requiring the shell to separately
+    export it — process environment variables still take precedence over
+    `.env`, exactly like every other setting here.
+    """
+
+    model_config = _SETTINGS_CONFIG
+
+    provider: str = Field(default="azure_openai", validation_alias="LLM_PROVIDER")
+
+
 class MLflowSettings(BaseSettings):
     """Experiment and run tracking configuration for MLflow."""
 
@@ -124,6 +142,16 @@ def load_groq_settings() -> GroqSettings:
     is selected, so Groq credentials are never required otherwise.
     """
     return GroqSettings()  # type: ignore[call-arg]
+
+
+def load_llm_provider_settings() -> LLMProviderSettings:
+    """Load `LLMProviderSettings` on demand (mirrors `load_groq_settings`).
+
+    Public — called directly by the provider factory to decide between
+    `groq` and `azure_openai`. `provider` has a default, so this never
+    raises even when `LLM_PROVIDER` is unset.
+    """
+    return LLMProviderSettings()
 
 
 def _load_mlflow_settings() -> MLflowSettings:
