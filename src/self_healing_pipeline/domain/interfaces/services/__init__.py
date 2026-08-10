@@ -10,10 +10,16 @@ from self_healing_pipeline.domain.interfaces.services.csv_repair_executor import
 from self_healing_pipeline.domain.interfaces.services.csv_repair_proposal_port import (
     CsvRepairProposalPort,
 )
+from self_healing_pipeline.domain.interfaces.services.repair_run_tracker import (
+    RepairRunTracker,
+    TrackingOutcome,
+)
 
 __all__ = [
     "CsvExecutionOutcome",
     "CsvFailureDetector",
     "CsvRepairExecutor",
     "CsvRepairProposalPort",
+    "RepairRunTracker",
+    "TrackingOutcome",
 ]
