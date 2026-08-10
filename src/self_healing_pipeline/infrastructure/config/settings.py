@@ -56,6 +56,26 @@ class AzureOpenAISettings(BaseSettings):
     deployment_name: str = Field(validation_alias="AZURE_OPENAI_DEPLOYMENT_NAME")
 
 
+class GroqSettings(BaseSettings):
+    """Credentials and model for the temporary Groq development provider.
+
+    Deliberately NOT part of the aggregate `Settings` root below: Groq is
+    a temporary development-only stand-in for Azure OpenAI (selected via
+    `LLM_PROVIDER=groq`), so its configuration must not become mandatory
+    when the system is configured for the production Azure OpenAI
+    provider, and vice versa. Loaded on demand by the provider factory
+    only when `LLM_PROVIDER=groq` is actually selected.
+    """
+
+    model_config = _SETTINGS_CONFIG
+
+    api_key: str = Field(validation_alias="GROQ_API_KEY")
+    model: str = Field(validation_alias="GROQ_MODEL")
+    base_url: str = Field(
+        default="https://api.groq.com/openai/v1", validation_alias="GROQ_BASE_URL"
+    )
+
+
 class MLflowSettings(BaseSettings):
     """Experiment and run tracking configuration for MLflow."""
 
@@ -86,8 +106,24 @@ def _load_database_settings() -> DatabaseSettings:
     return DatabaseSettings()  # type: ignore[call-arg]
 
 
-def _load_azure_openai_settings() -> AzureOpenAISettings:
+def load_azure_openai_settings() -> AzureOpenAISettings:
+    """Load `AzureOpenAISettings`.
+
+    Public — also called directly by the provider factory when
+    `LLM_PROVIDER=azure_openai` is selected, in addition to being used as
+    the `Settings` aggregate's own default factory below.
+    """
     return AzureOpenAISettings()  # type: ignore[call-arg]
+
+
+def load_groq_settings() -> GroqSettings:
+    """Load `GroqSettings` on demand (not part of the `Settings` aggregate).
+
+    Public — unlike the aggregate's private `_load_*` factories, this is
+    called directly by the provider factory only when `LLM_PROVIDER=groq`
+    is selected, so Groq credentials are never required otherwise.
+    """
+    return GroqSettings()  # type: ignore[call-arg]
 
 
 def _load_mlflow_settings() -> MLflowSettings:
@@ -109,7 +145,7 @@ class Settings(BaseModel):
 
     application: ApplicationSettings = Field(default_factory=_load_application_settings)
     database: DatabaseSettings = Field(default_factory=_load_database_settings)
-    azure_openai: AzureOpenAISettings = Field(default_factory=_load_azure_openai_settings)
+    azure_openai: AzureOpenAISettings = Field(default_factory=load_azure_openai_settings)
     mlflow: MLflowSettings = Field(default_factory=_load_mlflow_settings)
     logging: LoggingSettings = Field(default_factory=_load_logging_settings)
 
