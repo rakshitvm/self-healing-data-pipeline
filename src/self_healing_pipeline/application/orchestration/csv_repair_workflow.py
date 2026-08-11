@@ -17,7 +17,17 @@ Node responsibilities:
   failure is detected, the graph short-circuits straight to success
   without ever invoking the proposal port.
 - `propose`: the reasoning boundary. Delegates to `CsvRepairProposalPort`
-  and stores its *raw, unvalidated* output.
+  and stores its *raw, unvalidated* output. For `WRONG_ENCODING` only, a
+  deterministic (no LLM) `chardet` pass over the file's raw bytes adds a
+  best-effort encoding hint to the *local* sample text handed to the
+  port — `state["sample"]` itself is never altered, and every other
+  failure class's sample is passed through unchanged. Because `encoding`
+  is directly determined by the file's actual bytes rather than a matter
+  of judgment, when chardet names one, that single field of the LLM's raw
+  proposal is deterministically corrected to match before the proposal is
+  stored — every other field remains exactly what the LLM returned, and
+  the (possibly-corrected) result still flows through `validate`
+  unchanged, so an invalid proposal still never reaches `apply`.
 - `validate`: the only thing allowed to turn a raw proposal into a
   `CsvRepairParams` that `apply` may use. An invalid proposal never
   reaches `apply`.
@@ -35,6 +45,7 @@ to `propose` — there is no unconditional cycle in this graph.
 from typing import Annotated, Any, TypedDict
 from uuid import UUID, uuid4
 
+import chardet
 from langchain_core.messages import AIMessage, BaseMessage, ToolCall
 from langchain_core.tools import tool
 from langgraph.graph import END, START, StateGraph
@@ -146,15 +157,51 @@ def _route_after_diagnose(state: CsvRepairWorkflowState) -> str:
     return "propose" if state["failure_class"] is not None else "healthy"
 
 
+def _detect_encoding(file_path: str) -> chardet.DetectionDict | None:
+    """Best-effort, deterministic byte-level encoding detection.
+
+    Reads `file_path`'s raw bytes and runs `chardet.detect` (no LLM call,
+    no randomness). Returns `None` on any I/O failure or when chardet
+    can't name an encoding, so callers can always fall back gracefully
+    without special-casing failure.
+    """
+    try:
+        with open(file_path, "rb") as fh:
+            raw = fh.read()
+        detected = chardet.detect(raw)
+    except Exception:  # noqa: BLE001 - best-effort: must never block the LLM proposal
+        return None
+
+    if detected["encoding"] is None:
+        return None
+    return detected
+
+
 def _make_propose_node(llm_port: CsvRepairProposalPort) -> Any:
     def propose(state: CsvRepairWorkflowState) -> dict[str, Any]:
         failure_class = state["failure_class"]
         assert failure_class is not None  # guaranteed by _route_after_diagnose
+        sample = state["sample"] or ""
+        detected_encoding: str | None = None
+        if failure_class is FailureClass.WRONG_ENCODING:
+            detected = _detect_encoding(state["file_path"])
+            if detected is not None:
+                detected_encoding = detected["encoding"]
+                sample = (
+                    f"Deterministic encoding detection (chardet): {detected_encoding} "
+                    f"(confidence={detected['confidence']:.2f})\n{sample}"
+                )
         raw = llm_port.propose(
             failure_class=failure_class,
-            sample=state["sample"] or "",
+            sample=sample,
             file_path=state["file_path"],
         )
+        if detected_encoding is not None and isinstance(raw, dict):
+            # The LLM still proposes every other field; only `encoding` is
+            # deterministically known from the actual bytes, so it — and
+            # only it — is corrected here. The result still flows through
+            # the unchanged `validate` node before ever reaching `apply`.
+            raw = {**raw, "encoding": detected_encoding}
         return {"proposed_params": raw}
 
     return propose

@@ -10,6 +10,8 @@ Elasticsearch.
 from pathlib import Path
 from typing import Any
 
+import chardet
+
 from self_healing_pipeline.application.orchestration.csv_repair_workflow import (
     SAMPLE_TOOL_NODE_NAME,
     build_csv_repair_workflow,
@@ -133,7 +135,12 @@ def test_wrong_encoding_flows_through_workflow(tmp_path: Path) -> None:
     assert result["status"] == RepairEpisodeStatus.SUCCEEDED
     assert result["repair_result"] is not None
     assert result["repair_result"].prescription is not None
-    assert result["repair_result"].prescription.encoding == "latin-1"
+    # `propose` deterministically corrects `encoding` from the file's real
+    # bytes via chardet, overriding whatever the (fake) LLM proposed — so
+    # the applied encoding is chardet's answer, not the fake port's
+    # "latin-1", even though both decode this fixture identically.
+    expected_encoding = chardet.detect(path.read_bytes())["encoding"]
+    assert result["repair_result"].prescription.encoding == expected_encoding
 
 
 def test_single_column_malformation_flows_through_workflow(tmp_path: Path) -> None:
