@@ -68,6 +68,7 @@ from self_healing_pipeline.domain.value_objects.csv_repair_params import CsvRepa
 from self_healing_pipeline.domain.value_objects.failure_class import FailureClass
 from self_healing_pipeline.domain.value_objects.pipeline_status import RepairEpisodeStatus
 from self_healing_pipeline.domain.value_objects.repair_result import RepairResult
+from self_healing_pipeline.infrastructure.logging.logger import get_logger
 
 SAMPLE_TOOL_NODE_NAME = "sample_tool"
 DEFAULT_MAX_SAMPLE_LINES = 5
@@ -130,12 +131,17 @@ def build_initial_state(
 
 def _make_prepare_sample_call_node(max_sample_lines: int) -> Any:
     def prepare_sample_call(state: CsvRepairWorkflowState) -> dict[str, Any]:
+        logger = get_logger(agent="CsvRepairAgent", node="prepare_sample_call", table=None)
+
         call = ToolCall(
             name=sample_csv_file.name,
             args={"file_path": state["file_path"], "max_lines": max_sample_lines},
             id="sample-call",
             type="tool_call",
         )
+
+        logger.info("node_completed", file_path=state["file_path"])
+
         return {"messages": [AIMessage(content="", tool_calls=[call])]}
 
     return prepare_sample_call
@@ -148,7 +154,23 @@ def _extract_sample(state: CsvRepairWorkflowState) -> dict[str, Any]:
 
 def _make_diagnose_node(detector: CsvFailureDetector) -> Any:
     def diagnose(state: CsvRepairWorkflowState) -> dict[str, Any]:
-        return {"failure_class": detector.detect(state["file_path"])}
+        logger = get_logger(
+            agent="CsvRepairAgent",
+            node="diagnose",
+            table=None,
+        )
+
+        failure_class = detector.detect(state["file_path"])
+
+        logger.info(
+            "node_completed",
+            file_path=state["file_path"],
+            failure_class=(
+                failure_class.value if failure_class is not None else None
+            ),
+        )
+
+        return {"failure_class": failure_class}
 
     return diagnose
 
@@ -179,6 +201,8 @@ def _detect_encoding(file_path: str) -> chardet.DetectionDict | None:
 
 def _make_propose_node(llm_port: CsvRepairProposalPort) -> Any:
     def propose(state: CsvRepairWorkflowState) -> dict[str, Any]:
+        logger = get_logger(agent="CsvRepairAgent", node="propose", table=None)
+
         failure_class = state["failure_class"]
         assert failure_class is not None  # guaranteed by _route_after_diagnose
         sample = state["sample"] or ""
@@ -202,19 +226,40 @@ def _make_propose_node(llm_port: CsvRepairProposalPort) -> Any:
             # only it — is corrected here. The result still flows through
             # the unchanged `validate` node before ever reaching `apply`.
             raw = {**raw, "encoding": detected_encoding}
+
+        logger.info(
+            "node_completed",
+            failure_class=failure_class.value,
+            proposal=raw,
+        )
+
         return {"proposed_params": raw}
 
     return propose
 
 
 def _validate(state: CsvRepairWorkflowState) -> dict[str, Any]:
+    logger = get_logger(agent="CsvRepairAgent", node="validate", table=None)
+
     raw = state["proposed_params"] or {}
+    validated_params: CsvRepairParams | None
+    validation_errors: list[str]
     try:
-        params = CsvRepairParams.model_validate(raw)
+        validated_params = CsvRepairParams.model_validate(raw)
+        validation_errors = []
     except ValidationError as exc:
-        errors = [f"{'.'.join(str(loc) for loc in e['loc'])}: {e['msg']}" for e in exc.errors()]
-        return {"validated_params": None, "validation_errors": errors}
-    return {"validated_params": params, "validation_errors": []}
+        validated_params = None
+        validation_errors = [
+            f"{'.'.join(str(loc) for loc in e['loc'])}: {e['msg']}" for e in exc.errors()
+        ]
+
+    logger.info(
+        "node_completed",
+        validation_status="valid" if validated_params is not None else "invalid",
+        validation_errors=validation_errors,
+    )
+
+    return {"validated_params": validated_params, "validation_errors": validation_errors}
 
 
 def _route_after_validation(state: CsvRepairWorkflowState) -> str:
@@ -225,6 +270,8 @@ def _route_after_validation(state: CsvRepairWorkflowState) -> str:
 
 def _make_apply_node(executor: CsvRepairExecutor) -> Any:
     def apply(state: CsvRepairWorkflowState) -> dict[str, Any]:
+        logger = get_logger(agent="CsvRepairAgent", node="apply", table=None)
+
         params = state["validated_params"]
         assert params is not None  # guaranteed by _route_after_validation
         outcome = executor.execute(state["file_path"], params)
@@ -236,6 +283,14 @@ def _make_apply_node(executor: CsvRepairExecutor) -> Any:
             validation_errors=outcome.validation_errors,
             message=outcome.message,
         )
+
+        logger.info(
+            "node_completed",
+            success=result.success,
+            applied=result.applied,
+            message=result.message,
+        )
+
         return {"repair_result": result}
 
     return apply
@@ -243,9 +298,18 @@ def _make_apply_node(executor: CsvRepairExecutor) -> Any:
 
 def _make_reverify_node(executor: CsvRepairExecutor) -> Any:
     def reverify(state: CsvRepairWorkflowState) -> dict[str, Any]:
+        logger = get_logger(agent="CsvRepairAgent", node="reverify", table=None)
+
         params = state["validated_params"]
         assert params is not None  # guaranteed by _route_after_validation
         outcome = executor.execute(state["file_path"], params)
+
+        logger.info(
+            "node_completed",
+            success=outcome.success,
+            message=outcome.message,
+        )
+
         return {"verification_result": outcome}
 
     return reverify
@@ -263,11 +327,23 @@ def _increment_retry(state: CsvRepairWorkflowState) -> dict[str, Any]:
 
 
 def _set_success(state: CsvRepairWorkflowState) -> dict[str, Any]:
+    logger = get_logger(agent="CsvRepairAgent", node="set_success", table=None)
+    logger.info("repair_completed", success=True)
     return {"status": RepairEpisodeStatus.SUCCEEDED, "error_message": None}
 
 
 def _set_failure(state: CsvRepairWorkflowState) -> dict[str, Any]:
+    logger = get_logger(agent="CsvRepairAgent", node="set_failure", table=None)
     reason = "; ".join(state["validation_errors"]) or "verification did not succeed"
+
+    failure_class = state["failure_class"]
+    logger.info(
+        "repair_completed",
+        success=False,
+        failure_class=failure_class.value if failure_class is not None else None,
+        validation_errors=state["validation_errors"],
+    )
+
     return {"status": RepairEpisodeStatus.FAILED, "error_message": reason}
 
 

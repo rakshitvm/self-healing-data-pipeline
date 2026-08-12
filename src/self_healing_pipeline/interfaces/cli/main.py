@@ -32,6 +32,8 @@ import sys
 
 import click
 
+from self_healing_pipeline.infrastructure.logging.logger import configure_logging
+
 from self_healing_pipeline.application.orchestration.csv_repair_workflow import (
     build_csv_repair_workflow,
 )
@@ -145,6 +147,7 @@ def build_production_error_router() -> ErrorRouter:
 @click.group()
 def cli() -> None:
     """Self-Healing Data Pipeline — Tier 1 CLI."""
+    configure_logging()
 
 
 @cli.command()
