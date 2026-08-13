@@ -2,40 +2,294 @@
 
 ## Overview
 
-TBD
+A self-healing data pipeline that detects and repairs structural data-quality
+problems using deterministic detection, an LLM that *proposes* (never
+applies) a fix, Pydantic validation, and — for anything data-changing —
+mandatory human approval before the fix is applied. Every decision is
+recorded in PostgreSQL and/or an append-only JSON history, and every
+repair is traced in MLflow.
 
-## Prerequisites
+Two independent capabilities are implemented:
 
-- Python 3.11+
-- Docker & Docker Compose
+- **Tier 1 — CSV parse-failure self-healing**: detects and repairs
+  malformed CSV files (wrong delimiter, wrong encoding, single-column
+  malformation, missing/misplaced header, inconsistent field counts),
+  including files with more than one of these problems at once.
+- **Tier 2 — Schema-drift repair**: detects drift between a
+  source-controlled schema baseline and a table's current structure
+  (added/removed/renamed/retyped columns) and proposes a repair, always
+  gated behind human approval.
 
-## Setup
+## Architecture
+
+Clean/hexagonal architecture (`domain` → `application` → `infrastructure`
+→ `interfaces`), dependency inversion throughout — the domain layer knows
+nothing about pandas, LangGraph, MLflow, PostgreSQL, Click, or any LLM
+provider; everything infrastructure-specific is injected via `typing.Protocol`
+ports, wired together in one composition root
+(`src/self_healing_pipeline/interfaces/cli/main.py`).
+
+Both tiers are independent LangGraph `StateGraph` workflows:
+
+```
+Tier 1: src/self_healing_pipeline/application/orchestration/csv_repair_workflow.py
+  sample -> diagnose -> propose -> validate -> [human_approval*] -> apply -> reverify
+  * only for a genuine multi-failure episode — a single-failure repair
+    auto-applies exactly as it always has (backward compatible)
+
+Tier 2: src/self_healing_pipeline/application/orchestration/schema_repair_workflow.py
+  detect -> diff -> resolve_renames (nested subgraph) -> propose -> validate
+    -> confidence_gate -> human_approval -> apply -> verify
+```
+
+The Tier 2 `resolve_renames` node is a genuinely separate, independently
+compiled `StateGraph` (`rename_resolution_subgraph.py`,
+`fuzzy_match -> llm_confirm -> confidence_score`) invoked as a single node
+of the parent graph — not simulated with a function call; MLflow's own
+trace correctly shows its internal nodes nested under the parent.
+
+### Tier 1 — CSV repair
+
+- **Detection** (`infrastructure/csv/local_csv_failure_detector.py`,
+  `LocalCsvFailureDetector`): fully deterministic, stdlib-only (`csv.Sniffer`,
+  `csv.reader`) plus `chardet` for encoding. `detect_all()` returns every
+  applicable failure as a set (backward-compatible `detect()` still
+  returns the single highest-priority one). Empirically verified maximum
+  simultaneous set: `{WRONG_ENCODING, WRONG_DELIMITER}` or
+  `{WRONG_ENCODING, one structural class}` — `csv.Sniffer` cannot
+  confidently report a delimiter under the same raggedness that would
+  also trigger a structural failure, so a genuine three-way combination
+  isn't achievable through this mechanism.
+- **Proposal**: `CsvRepairProposalPort` (Groq or Azure OpenAI — see
+  Configuration) proposes delimiter/encoding/header_row/engine. For a
+  multi-failure episode, the sample is prefixed with a deterministic
+  evidence line listing every detected failure so the LLM proposes one
+  combined fix. For `WRONG_ENCODING`, a deterministic `chardet` pass
+  additionally corrects only the `encoding` field after the LLM
+  responds — never overwriting whatever the LLM proposed for the other
+  fields.
+- **Validation**: `CsvRepairParams` (Pydantic) — a proposal that doesn't
+  validate never reaches apply; the workflow retries (bounded) or fails.
+- **Human approval**: only for multi-failure episodes (`human_approval`
+  node) — single-failure repairs auto-apply.
+- **Apply/reverify**: `PandasCsvRepairExecutor` — same validated params
+  applied via one `pd.read_csv(...)` call, then independently
+  re-verified.
+
+### Tier 2 — Schema repair
+
+- **Baseline**: versioned, source-controlled JSON per table
+  (`configs/schema_baselines/<table>.json`).
+- **Diff**: deterministic (`application/orchestration/schema_diff.py`) —
+  added/removed/type-changed columns, plus rename *hints* from stdlib
+  `difflib` name-similarity. The LLM never computes the raw diff.
+- **Rename resolution**: the nested subgraph confirms/rejects each rename
+  hint via the LLM (`RenameConfirmationPort`) and blends fuzzy +
+  LLM confidence into a final score.
+- **Repair order**: operations are always normalized into
+  `rename -> cast -> drop -> add_default`
+  (`domain/value_objects/schema_repair_operations.py`,
+  `normalize_operation_order`) regardless of what order they were
+  proposed/assembled in.
+- **Confidence gating**: below-threshold proposals are flagged
+  `escalated` (extra logging/visibility) but — per an explicit
+  requirement — **every** proposal, low or high confidence, still
+  requires human approval; nothing auto-applies.
+- **Human approval**: `HumanApprovalPort`, framework-agnostic (no Click
+  in the domain/application layers) — `ClickHumanApprovalPort` is the
+  CLI implementation; a rejection never applies and is recorded.
+- **History**: every attempt (applied or rejected) is an append-only
+  entry in `configs/schema_migrations/<episode_id>/*.json`, mirrored
+  best-effort into PostgreSQL (`schema_migration_events` table). On a
+  retry with the same `--episode-id`, prior history is loaded and a
+  previously-rejected operation is never re-proposed in that episode.
+
+## Human-in-the-loop approval
+
+The LLM may analyze, propose, and assign confidence — it may never
+authorize a data-changing repair. Tier 2 always requires approval;
+Tier 1 requires it specifically for multi-failure episodes. See
+`docs/architecture/adr/0003-human-in-the-loop-approval.md`.
+
+Example prompt:
+```
+Schema drift detected for table: customers
+
+Diff:
+  + country: string
+  ~ age: string -> int64
+
+Proposed repair order:
+  1. cast age -> int64
+  2. add country = 'UNKNOWN'
+
+Confidence: 0.94
+
+Approve repair? [y/N]:
+```
+Only `y`/`yes` proceeds to apply; anything else (including empty input)
+rejects — the file/data is left unchanged, and the rejection is recorded.
+
+## LLM provider abstraction
+
+`CsvRepairProposalPort` / `RenameConfirmationPort` (domain Protocols) —
+concrete implementations for Groq (`infrastructure/llm/groq_*.py`,
+temporary development provider) and Azure OpenAI
+(`infrastructure/llm/azure_*.py`, the intended production provider,
+selected via `LLM_PROVIDER=azure_openai`). See ADR 0004 for why the LLM
+proposes rather than mutates data directly, and why execution stays
+100% deterministic regardless of provider.
+
+**Azure OpenAI: integration exists in code but is NOT yet verified with
+real credentials — PENDING, expected tomorrow.** Every real end-to-end
+demo run to date has used Groq (`LLM_PROVIDER=groq`), which shares the
+same `openai`-SDK-based call pattern MLflow autologs identically.
+
+## Observability
+
+- **Structured logging**: `infrastructure/logging/logger.py`,
+  JSON via `structlog`. Every workflow node logs `agent`, `node`,
+  `table`, `trace_id`, and a `node_completed`/`repair_completed` event.
+- **`trace_id` propagation**: `get_logger()` best-effort reads the
+  currently-active MLflow trace ID (`mlflow.get_active_trace_id()`) so
+  every node's log line carries the same `trace_id` as the MLflow trace
+  and the PostgreSQL/JSON audit record for that episode.
+- **MLflow tracing**: `infrastructure/mlflow/mlflow_repair_trace_tracer.py`
+  wraps each graph invocation in one outer trace; `mlflow.langchain.autolog()`
+  + `mlflow.openai.autolog()` (enabled once, `tracing_setup.py`)
+  auto-instrument every LangGraph node, the sampling `TOOL` span, and
+  every raw LLM call as a `CHAT_MODEL` span with real prompt/response and
+  (from the SDK's own `usage` object) real token counts — with zero
+  custom instrumentation code.
+- **Token/cost observability**: `infrastructure/mlflow/trace_llm_usage.py`
+  sums the real, already-captured `mlflow.chat.tokenUsage`/`mlflow.llm.cost`
+  across a trace's `CHAT_MODEL` spans (never fabricated — cost is simply
+  omitted if MLflow has no pricing entry for the model). Tier 1 logs the
+  result as real MLflow Run metrics (`input_tokens`/`output_tokens`/
+  `total_tokens`/`cost_usd`); Tier 2 stores it on the migration history
+  entry (`SchemaMigrationEntry.token_usage`).
+- **PostgreSQL audit**: `repair_episodes`/`repair_events` (Tier 1, always
+  authoritative — MLflow is best-effort observability on top) and
+  `schema_migration_events` (Tier 2, best-effort mirror of the JSON
+  history, which is authoritative for Tier 2).
+
+## Docker setup
 
 ```bash
-# 1. Create and activate a virtual environment
-python -m venv venv
-source venv/bin/activate
-
-# 2. Install dependencies
-pip install -r requirements-dev.txt
-
-# 3. Configure environment
-cp .env.example .env
+docker compose up -d          # PostgreSQL + self-hosted MLflow
+docker compose ps             # both should show "healthy"
 ```
+MLflow UI: http://localhost:5000. PostgreSQL: `localhost:5432` (see
+`.env.example` for credentials).
+
+## Configuration
+
+Copy `.env.example` to `.env`. Key variables:
+
+| Variable | Purpose |
+|---|---|
+| `LLM_PROVIDER` | `azure_openai` (production) or `groq` (temporary dev) |
+| `AZURE_OPENAI_API_KEY`/`_ENDPOINT`/`_API_VERSION`/`_DEPLOYMENT_NAME` | Azure OpenAI (PENDING credentials) |
+| `GROQ_API_KEY`/`GROQ_MODEL` | Groq (dev provider, currently used for all real demos) |
+| `DATABASE_URL`, `DB_*` | PostgreSQL connection |
+| `MLFLOW_TRACKING_URI`, `MLFLOW_EXPERIMENT_NAME` | MLflow |
+| `LOG_LEVEL`, `LOG_FORMAT` | Structured logging |
 
 ## Running
 
-TBD
-
-## Testing
-
 ```bash
-pytest
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt
+cp .env.example .env   # fill in real values
+docker compose up -d
 ```
 
-## Project Structure
+### Tier 1 — healthy CSV
+```bash
+printf 'id,name,value\n1,alpha,10\n2,beta,20\n' > /tmp/healthy.csv
+PYTHONPATH=src python -m self_healing_pipeline.interfaces.cli.main repair /tmp/healthy.csv
+# -> "HEALTHY: ... already parses correctly." — no LLM call, no audit episode, no MLflow run
+```
 
-See [docs/architecture/overview.md](docs/architecture/overview.md).
+### Tier 1 — each failure class
+```bash
+# wrong_delimiter
+printf 'id;name;value\n1;alpha;10\n2;beta;20\n' > /tmp/f1.csv
+# wrong_encoding (Latin-1 bytes)
+python3 -c "open('/tmp/f2.csv','wb').write('id,name\n1,café\n2,naïve\n'.encode('latin-1'))"
+# header_detection (junk title line)
+printf 'Report\nid,name,value\n1,a,10\n2,b,20\n' > /tmp/f3.csv
+# engine_selection (missing field — genuinely repairable variant)
+printf 'id,name,value\n1,a,10\n2,b\n3,c,30\n' > /tmp/f4.csv
+# single_column_malformation
+printf 'id:name:age\n1:Alice:30\n2:Bob:25\n' > /tmp/f5.csv
+
+PYTHONPATH=src python -m self_healing_pipeline.interfaces.cli.main repair /tmp/f1.csv
+```
+
+### Tier 1 — multi-error
+```bash
+python3 -c "open('/tmp/multi.csv','wb').write('id;name;age\n1;café;30\n2;naïve;25\n'.encode('latin-1'))"
+PYTHONPATH=src python -m self_healing_pipeline.interfaces.cli.main repair /tmp/multi.csv
+# detects {wrong_encoding, wrong_delimiter} -> combined proposal -> human approval prompt -> apply -> reverify
+```
+
+### Tier 2 — schema repair
+```bash
+# baseline already exists at configs/schema_baselines/customers_added.json
+printf 'id,name,age,country\n1,Alice,30,India\n' > /tmp/customers.csv
+PYTHONPATH=src python -m self_healing_pipeline.interfaces.cli.main schema-repair customers_added /tmp/customers.csv
+```
+
+### Inspecting results
+- **Logs**: stdout, JSON lines — `grep trace_id` to follow one episode across every node.
+- **PostgreSQL**: `docker exec self-healing-pipeline-postgres psql -U postgres -d self_healing_pipeline -c "SELECT * FROM repair_episodes ORDER BY started_at DESC LIMIT 5;"`
+- **MLflow**: open http://localhost:5000, or `mlflow.get_trace(trace_id)` from the printed `trace_id`.
+- **Schema migration history**: `configs/schema_migrations/<episode_id>/*.json`.
+
+## Tests and quality checks
+
+```bash
+PYTHONPATH=src pytest -q
+ruff check src/ tests/
+ruff check scripts/
+mypy --strict src/ tests/
+```
+
+## Known limitations
+
+- **Azure OpenAI is not yet verified** — code path exists and mirrors the
+  already-verified Groq path exactly (same `openai` SDK usage, same
+  MLflow autolog behavior), but has not been run against real Azure
+  credentials. PENDING.
+- A genuine three-way simultaneous Tier 1 failure (encoding + delimiter +
+  a structural class) is not achievable with the current
+  `csv.Sniffer`-based detector — architecturally explained in
+  `local_csv_failure_detector.py`'s module docstring.
+- `ENGINE_SELECTION`'s "extra field" (ragged row with *more* fields than
+  the header) trigger is not repairable by any `CsvRepairParams` — this
+  is a schema-shape limitation (no error-recovery field), not a bug; the
+  "missing field" variant is genuinely repairable and is what the CLI
+  demo above uses.
+- A known, intermittent MLflow trace-tag race can occasionally cause one
+  integration test to fail under full-suite load (self-heals on rerun;
+  already mitigated with bounded retries, see
+  `mlflow_repair_trace_tracer.py`).
+
+## Intentionally deferred
+
+- Multi-error **schema** detection (Tier 2 currently handles one drift
+  episode's diff at a time; Tier 1 multi-error CSV detection is
+  implemented — see above).
+- Tier 3/Tier 4 features (not scoped for this project phase).
+- A UI/API approval mechanism (the approval ports are already
+  framework-agnostic Protocols specifically so a CLI prompt can be
+  swapped later without touching the workflow).
+
+## Project structure
+
+See [docs/architecture/overview.md](docs/architecture/overview.md) and
+`docs/architecture/adr/` for architecture decision records.
 
 ## License
 
