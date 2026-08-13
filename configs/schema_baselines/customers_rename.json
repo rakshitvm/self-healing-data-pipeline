@@ -1,0 +1,5 @@
+{"table": "customers_rename", "version": 1, "columns": [
+  {"name": "id", "type": "int64", "nullable": false},
+  {"name": "customer_name", "type": "string", "nullable": false},
+  {"name": "age", "type": "int64", "nullable": true}
+]}

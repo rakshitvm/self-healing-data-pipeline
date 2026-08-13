@@ -1,0 +1,5 @@
+{"table": "customers_nochange", "version": 1, "columns": [
+  {"name": "id", "type": "int64", "nullable": false},
+  {"name": "name", "type": "string", "nullable": false},
+  {"name": "age", "type": "int64", "nullable": true}
+]}

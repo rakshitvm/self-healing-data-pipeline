@@ -1,0 +1,81 @@
+{
+  "applied": true,
+  "baseline_version": 1,
+  "confidence": 1.0,
+  "created_at": "2026-08-13T10:54:32.111730Z",
+  "current_schema": [
+    {
+      "default": null,
+      "name": "id",
+      "nullable": false,
+      "type": "int64"
+    },
+    {
+      "default": null,
+      "name": "name",
+      "nullable": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "name": "age",
+      "nullable": false,
+      "type": "int64"
+    }
+  ],
+  "diff": {
+    "added": [
+      {
+        "default": null,
+        "name": "name",
+        "nullable": false,
+        "type": "string"
+      }
+    ],
+    "removed": [
+      {
+        "default": null,
+        "name": "customer_name",
+        "nullable": false,
+        "type": "string"
+      }
+    ],
+    "rename_hints": [
+      {
+        "added_column": "name",
+        "removed_column": "customer_name",
+        "similarity": 0.47058823529411764
+      }
+    ],
+    "type_changed": []
+  },
+  "entry_id": "7f349fab-3986-4e80-a4a1-86824f784d5b",
+  "episode_id": "a89da7e9-4252-4f67-a1d6-10f0da278e43",
+  "human_approved": true,
+  "mlflow_run_id": null,
+  "prescription": {
+    "confidence": 1.0,
+    "operations": [
+      {
+        "column": "name",
+        "default": null,
+        "op": "drop",
+        "target_column": null,
+        "target_type": null
+      },
+      {
+        "column": "customer_name",
+        "default": "UNKNOWN",
+        "op": "add_default",
+        "target_column": null,
+        "target_type": "string"
+      }
+    ],
+    "table": "customers_rename"
+  },
+  "status": "succeeded",
+  "table": "customers_rename",
+  "token_usage": null,
+  "trace_id": "tr-2f6c5c239f1ddabf715fa69354007060",
+  "verification_message": "schema repair applied and verified"
+}

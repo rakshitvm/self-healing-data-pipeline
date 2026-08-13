@@ -16,6 +16,7 @@ authoritative-result change.
 """
 
 import sys
+import time
 from collections.abc import Callable
 from typing import TypeVar
 from uuid import UUID
@@ -23,6 +24,9 @@ from uuid import UUID
 import mlflow
 
 T = TypeVar("T")
+
+_TAG_RETRY_ATTEMPTS = 3
+_TAG_RETRY_DELAY_SECONDS = 0.1
 
 
 class MlflowRepairTraceTracer:
@@ -69,8 +73,24 @@ class MlflowRepairTraceTracer:
         return result, trace_id
 
     def tag_trace(self, trace_id: str, tags: dict[str, str]) -> None:
+        """Set each tag, retrying briefly on failure.
+
+        `mlflow.set_trace_tag` mutates an in-memory, not-yet-exported
+        trace directly when available; once the trace has been handed to
+        the async export queue (which happens the instant the span
+        exits, immediately before this is called) but before it is fully
+        queryable on the backend, `set_trace_tag` falls back to an HTTP
+        call that can transiently 404 against a trace that exists but
+        hasn't landed yet — more likely under concurrent load. A few
+        quick retries closes that window; a final failure is still
+        swallowed exactly as before (best-effort, never raises).
+        """
         for key, value in tags.items():
-            try:
-                mlflow.set_trace_tag(trace_id, key, value)
-            except Exception:  # noqa: BLE001 - tagging must never raise
-                pass
+            for attempt in range(_TAG_RETRY_ATTEMPTS):
+                try:
+                    mlflow.set_trace_tag(trace_id, key, value)
+                    break
+                except Exception:  # noqa: BLE001 - tagging must never raise
+                    if attempt == _TAG_RETRY_ATTEMPTS - 1:
+                        break
+                    time.sleep(_TAG_RETRY_DELAY_SECONDS)

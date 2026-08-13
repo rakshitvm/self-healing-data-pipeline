@@ -29,15 +29,25 @@ Usage:
 """
 
 import sys
+from pathlib import Path
+from uuid import UUID, uuid4
 
 import click
 
 from self_healing_pipeline.infrastructure.logging.logger import configure_logging
 
+from self_healing_pipeline.application.orchestration.audited_schema_repair import (
+    run_audited_schema_repair,
+)
 from self_healing_pipeline.application.orchestration.csv_repair_workflow import (
     build_csv_repair_workflow,
 )
 from self_healing_pipeline.application.orchestration.error_router import ErrorRouter
+from self_healing_pipeline.application.orchestration.schema_repair_workflow import (
+    build_initial_schema_repair_state,
+    build_schema_repair_workflow,
+    result_from_final_state,
+)
 from self_healing_pipeline.domain.exceptions.csv_errors import (
     CsvRepairError,
     EngineSelectionError,
@@ -81,10 +91,32 @@ from self_healing_pipeline.infrastructure.mlflow.mlflow_repair_run_tracker impor
 from self_healing_pipeline.infrastructure.mlflow.mlflow_repair_trace_tracer import (
     MlflowRepairTraceTracer,
 )
+from self_healing_pipeline.infrastructure.llm.rename_confirmation_provider_factory import (
+    build_rename_confirmation_provider,
+)
 from self_healing_pipeline.infrastructure.mlflow.tracing_setup import enable_tracing, flush_traces
 from self_healing_pipeline.infrastructure.persistence.postgres.repair_audit_store import (
     PostgresRepairAuditStore,
 )
+from self_healing_pipeline.infrastructure.schema.composite_migration_history_store import (
+    CompositeMigrationHistoryStore,
+)
+from self_healing_pipeline.infrastructure.schema.json_migration_history_store import (
+    JsonMigrationHistoryStore,
+)
+from self_healing_pipeline.infrastructure.schema.json_schema_baseline_store import (
+    JsonSchemaBaselineStore,
+)
+from self_healing_pipeline.infrastructure.schema.pandas_schema_executor import (
+    PandasSchemaExecutor,
+)
+from self_healing_pipeline.infrastructure.schema.pandas_schema_inspector import (
+    PandasSchemaInspector,
+)
+from self_healing_pipeline.infrastructure.schema.postgres_schema_migration_store import (
+    PostgresSchemaMigrationStore,
+)
+from self_healing_pipeline.interfaces.cli.click_human_approval import ClickHumanApprovalPort
 
 _FAILURE_CLASS_TO_ERROR: dict[FailureClass, type[CsvRepairError]] = {
     FailureClass.WRONG_DELIMITER: WrongDelimiterError,
@@ -193,6 +225,83 @@ def repair(file_path: str) -> None:
     click.echo(f"message: {result.message}")
 
     if not result.success:
+        sys.exit(1)
+
+
+_SCHEMA_BASELINES_DIR = Path("configs/schema_baselines")
+_SCHEMA_MIGRATIONS_DIR = Path("configs/schema_migrations")
+
+
+def _build_production_migration_history_store() -> CompositeMigrationHistoryStore:
+    """JSON is always the authoritative primary; the PostgreSQL mirror is
+    best-effort — if Postgres is unreachable, schema repair still works,
+    exactly as MLflow tracking degrades gracefully for Tier 1.
+    """
+    primary = JsonMigrationHistoryStore(root=_SCHEMA_MIGRATIONS_DIR)
+    mirror: PostgresSchemaMigrationStore | None
+    try:
+        mirror = PostgresSchemaMigrationStore.from_settings(get_settings().database)
+    except Exception:  # noqa: BLE001 - best-effort mirror, must never block schema repair
+        mirror = None
+    return CompositeMigrationHistoryStore(primary=primary, mirror=mirror)
+
+
+@cli.command(name="schema-repair")
+@click.argument("table")
+@click.argument("file_path", type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    "--episode-id",
+    "episode_id_option",
+    default=None,
+    help="Reuse an existing episode ID for continuity (skips re-proposing rejected operations).",
+)
+def schema_repair(table: str, file_path: str, episode_id_option: str | None) -> None:
+    """Detect and repair schema drift for TABLE against FILE_PATH's current structure.
+
+    A separate Tier 2 agent/workflow from `repair` (Tier 1 CSV repair) —
+    same composition-root pattern, same MLflow/logging infrastructure,
+    entirely independent pipeline. The LLM never authorizes application:
+    every prescription, regardless of confidence, requires an explicit
+    human "y"/"yes" before `apply` runs.
+    """
+    episode_id = UUID(episode_id_option) if episode_id_option else uuid4()
+
+    settings = get_settings()
+    enable_tracing(settings.mlflow)
+
+    history_store = _build_production_migration_history_store()
+    graph = build_schema_repair_workflow(
+        baseline_store=JsonSchemaBaselineStore(root=_SCHEMA_BASELINES_DIR),
+        inspector=PandasSchemaInspector(),
+        history_store=history_store,
+        confirmation_port=build_rename_confirmation_provider(),
+        approval_port=ClickHumanApprovalPort(),
+        executor=PandasSchemaExecutor(),
+    )
+    initial_state = build_initial_schema_repair_state(
+        episode_id=episode_id, table=table, file_path=file_path
+    )
+
+    try:
+        final_state = run_audited_schema_repair(
+            graph, initial_state, history_store=history_store, trace_tracer=MlflowRepairTraceTracer()
+        )
+    finally:
+        flush_traces()
+
+    result = result_from_final_state(final_state)
+
+    click.echo("")
+    click.echo(f"episode_id: {episode_id}")
+    click.echo(f"table: {table}")
+    click.echo(f"status: {result.status.value}")
+    click.echo(f"confidence: {result.confidence}")
+    click.echo(f"human_approved: {result.human_approved}")
+    if result.prescription is not None:
+        click.echo(f"prescription: {result.prescription.model_dump_json()}")
+    click.echo(f"message: {result.message}")
+
+    if result.status.value not in ("succeeded", "healthy"):
         sys.exit(1)
 
 
