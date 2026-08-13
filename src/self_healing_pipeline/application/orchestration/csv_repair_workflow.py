@@ -77,11 +77,28 @@ DEFAULT_MAX_RETRIES = 2
 
 @tool
 def sample_csv_file(file_path: str, max_lines: int) -> str:
-    """Read up to `max_lines` lines from the start of a local CSV file."""
+    """Read up to `max_lines` lines from the start of a local CSV file.
+
+    Encoding-aware via the existing `_detect_encoding` (chardet) helper,
+    so e.g. UTF-16 files are decoded correctly instead of corrupted —
+    falling back to UTF-8 with `errors="replace"`, exactly as before,
+    whenever detection finds nothing or the detected encoding itself
+    can't be used to open the file.
+    """
+    detected = _detect_encoding(file_path)
+    encoding = detected["encoding"] if detected is not None else "utf-8"
+
     lines: list[str] = []
-    with open(file_path, encoding="utf-8", errors="replace") as fh:
-        for _, line in zip(range(max_lines), fh, strict=False):
-            lines.append(line)
+    try:
+        with open(file_path, encoding=encoding, errors="replace") as fh:
+            for _, line in zip(range(max_lines), fh, strict=False):
+                lines.append(line)
+    except (LookupError, OSError):
+        lines = []
+        with open(file_path, encoding="utf-8", errors="replace") as fh:
+            for _, line in zip(range(max_lines), fh, strict=False):
+                lines.append(line)
+
     return "".join(lines)
 
 
