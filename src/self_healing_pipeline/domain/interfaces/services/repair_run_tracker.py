@@ -36,9 +36,21 @@ class RepairRunTracker(Protocol):
         ...
 
     def log_metrics(
-        self, run_id: str, *, latency_ms: int | None = None, token_usage: int | None = None
+        self,
+        run_id: str,
+        *,
+        latency_ms: int | None = None,
+        token_usage: int | None = None,
+        trace_id: str | None = None,
     ) -> TrackingOutcome:
-        """Log whatever metrics are available for `run_id`."""
+        """Log whatever metrics are available for `run_id`.
+
+        `trace_id`, when provided, lets the implementation derive real
+        token usage/cost from already-captured LLM span data (e.g.
+        MLflow's own OpenAI autolog) — never an invented or estimated
+        figure. `token_usage` remains available as a direct override for
+        a caller that already has a real value in hand.
+        """
         ...
 
     def end_run(self, run_id: str, *, status: str) -> TrackingOutcome:

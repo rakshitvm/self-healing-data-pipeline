@@ -18,10 +18,12 @@ authoritative-result change.
 import sys
 import time
 from collections.abc import Callable
-from typing import TypeVar
+from typing import Any, TypeVar
 from uuid import UUID
 
 import mlflow
+
+from self_healing_pipeline.infrastructure.mlflow.trace_llm_usage import aggregate_chat_model_usage
 
 T = TypeVar("T")
 
@@ -94,3 +96,6 @@ class MlflowRepairTraceTracer:
                     if attempt == _TAG_RETRY_ATTEMPTS - 1:
                         break
                     time.sleep(_TAG_RETRY_DELAY_SECONDS)
+
+    def get_llm_usage(self, trace_id: str) -> dict[str, Any] | None:
+        return aggregate_chat_model_usage(trace_id)

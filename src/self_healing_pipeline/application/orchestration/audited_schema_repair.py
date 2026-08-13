@@ -66,6 +66,14 @@ def run_audited_schema_repair(
             confidence=final_state["confidence"] or 0.0,
         )
 
+    # Real, already-captured usage from MLflow's own OpenAI autolog (see
+    # trace_llm_usage) — never fabricated; `None` when tracing is off or
+    # this episode's trace has no CHAT_MODEL span (e.g. the healthy or
+    # no-rename-candidate paths, which never call the LLM at all).
+    token_usage = None
+    if trace_id is not None and trace_tracer is not None:
+        token_usage = trace_tracer.get_llm_usage(trace_id)
+
     entry = SchemaMigrationEntry(
         episode_id=final_state["episode_id"],
         table=final_state["table"],
@@ -80,6 +88,7 @@ def run_audited_schema_repair(
         verification_message=final_state["message"],
         trace_id=trace_id,
         mlflow_run_id=None,
+        token_usage=token_usage,
     )
     history_store.record(entry)
 

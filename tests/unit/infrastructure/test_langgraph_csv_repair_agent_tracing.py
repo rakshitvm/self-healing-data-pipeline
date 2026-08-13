@@ -63,6 +63,9 @@ class _FakeTracer:
     def tag_trace(self, trace_id: str, tags: dict[str, str]) -> None:
         pass
 
+    def get_llm_usage(self, trace_id: str) -> dict[str, Any] | None:
+        return None
+
 
 def _write(tmp_path: Path, name: str, content: str) -> str:
     path = tmp_path / name

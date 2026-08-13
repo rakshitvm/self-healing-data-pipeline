@@ -297,8 +297,12 @@ def run_audited_csv_repair(
         )
         if start_outcome.success:
             mlflow_run_id = start_outcome.run_id
+            # `trace_id` lets the tracker derive real token usage/cost
+            # from already-captured LLM span data (e.g. MLflow's own
+            # OpenAI autolog) — this module has no MLflow-specific
+            # knowledge of how, keeping that confined to infrastructure.
             metrics_outcome = run_tracker.log_metrics(
-                cast(str, mlflow_run_id), latency_ms=elapsed_ms, token_usage=None
+                cast(str, mlflow_run_id), latency_ms=elapsed_ms, trace_id=trace_id
             )
             if not metrics_outcome.success:
                 tracking_error = metrics_outcome.error

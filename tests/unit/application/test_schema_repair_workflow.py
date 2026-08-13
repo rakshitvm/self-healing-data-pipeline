@@ -504,6 +504,53 @@ def test_migration_json_written_for_applied_and_rejected(tmp_path: Path) -> None
     )
 
 
+def test_migration_entry_records_real_trace_llm_usage(tmp_path: Path) -> None:
+    """`SchemaMigrationEntry.token_usage` must be populated from
+    `trace_tracer.get_llm_usage(trace_id)` — real, already-captured
+    MLflow data, never fabricated — when a trace_tracer is supplied."""
+
+    class _FakeTraceTracer:
+        def trace_invocation(self, invoke: Any, *, episode_id: UUID) -> tuple[Any, str | None]:
+            return invoke(), "tr-fake-123"
+
+        def tag_trace(self, trace_id: str, tags: dict[str, str]) -> None:
+            pass
+
+        def get_llm_usage(self, trace_id: str) -> dict[str, Any] | None:
+            assert trace_id == "tr-fake-123"
+            return {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
+
+    file_path = _write_csv(tmp_path, "approved.csv", "id,name,age,country\n1,Alice,30,India\n")
+    history = _InMemoryHistoryStore()
+    graph = build_schema_repair_workflow(
+        baseline_store=_FakeBaselineStore(BASELINE),
+        inspector=PandasSchemaInspector(),
+        history_store=history,
+        confirmation_port=_AlwaysRejectConfirmationPort(),
+        approval_port=_RecordingApprovalPort(approved=True),
+        executor=PandasSchemaExecutor(),
+    )
+    episode_id = uuid4()
+
+    run_audited_schema_repair(
+        graph,
+        build_initial_schema_repair_state(
+            episode_id=episode_id, table="customers", file_path=file_path
+        ),
+        history_store=history,
+        trace_tracer=_FakeTraceTracer(),
+    )
+
+    entries = history.load_episode_history(episode_id)
+    assert len(entries) == 1
+    assert entries[0].trace_id == "tr-fake-123"
+    assert entries[0].token_usage == {
+        "prompt_tokens": 100,
+        "completion_tokens": 20,
+        "total_tokens": 120,
+    }
+
+
 def test_healthy_episode_writes_no_migration_entry(tmp_path: Path) -> None:
     file_path = _write_csv(tmp_path, "customers.csv", "id,name,age\n1,Alice,30\n")
     history = _InMemoryHistoryStore()

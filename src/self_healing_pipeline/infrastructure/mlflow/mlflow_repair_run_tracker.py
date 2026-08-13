@@ -16,6 +16,7 @@ from mlflow.tracking import MlflowClient
 from self_healing_pipeline.domain.interfaces.services.repair_run_tracker import TrackingOutcome
 from self_healing_pipeline.domain.value_objects.failure_class import FailureClass
 from self_healing_pipeline.infrastructure.config.settings import MLflowSettings
+from self_healing_pipeline.infrastructure.mlflow.trace_llm_usage import aggregate_chat_model_usage
 
 _STATUS_TO_MLFLOW_RUN_STATUS = {
     "succeeded": "FINISHED",
@@ -55,13 +56,33 @@ class MlflowRepairRunTracker:
         return TrackingOutcome(success=True, run_id=run.info.run_id)
 
     def log_metrics(
-        self, run_id: str, *, latency_ms: int | None = None, token_usage: int | None = None
+        self,
+        run_id: str,
+        *,
+        latency_ms: int | None = None,
+        token_usage: int | None = None,
+        trace_id: str | None = None,
     ) -> TrackingOutcome:
         try:
             if latency_ms is not None:
                 self._client.log_metric(run_id, "latency_ms", float(latency_ms))
             if token_usage is not None:
                 self._client.log_metric(run_id, "token_usage", float(token_usage))
+            elif trace_id is not None:
+                # Real, already-captured usage from MLflow's own OpenAI
+                # autolog — never fabricated; simply absent when tracing
+                # is off or no CHAT_MODEL span exists on this trace (e.g.
+                # a multi-failure episode whose repair never reached the
+                # LLM), same as the token_usage=None case always was.
+                usage = aggregate_chat_model_usage(trace_id)
+                if usage is not None:
+                    self._client.log_metric(run_id, "input_tokens", float(usage["prompt_tokens"]))
+                    self._client.log_metric(
+                        run_id, "output_tokens", float(usage["completion_tokens"])
+                    )
+                    self._client.log_metric(run_id, "total_tokens", float(usage["total_tokens"]))
+                    if "total_cost_usd" in usage:
+                        self._client.log_metric(run_id, "cost_usd", float(usage["total_cost_usd"]))
         except Exception as exc:  # noqa: BLE001
             return TrackingOutcome(success=False, run_id=run_id, error=f"{type(exc).__name__}: {exc}")
         return TrackingOutcome(success=True, run_id=run_id)

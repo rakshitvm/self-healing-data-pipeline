@@ -18,7 +18,7 @@ double invocation of the wrapped callable.
 """
 
 from collections.abc import Callable
-from typing import Protocol, TypeVar, runtime_checkable
+from typing import Any, Protocol, TypeVar, runtime_checkable
 from uuid import UUID
 
 T = TypeVar("T")
@@ -39,4 +39,11 @@ class RepairTraceTracer(Protocol):
 
     def tag_trace(self, trace_id: str, tags: dict[str, str]) -> None:
         """Best-effort: attach additional tags to an already-created trace."""
+        ...
+
+    def get_llm_usage(self, trace_id: str) -> dict[str, Any] | None:
+        """Best-effort: real, already-captured LLM token usage/cost for
+        `trace_id` (e.g. summed from MLflow's own OpenAI autolog spans)
+        — never an invented or estimated figure. `None` if unavailable.
+        """
         ...

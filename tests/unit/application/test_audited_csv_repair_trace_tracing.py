@@ -76,6 +76,9 @@ class _SucceedingTracer:
     def tag_trace(self, trace_id: str, tags: dict[str, str]) -> None:
         self.tags.append((trace_id, tags))
 
+    def get_llm_usage(self, trace_id: str) -> dict[str, Any] | None:
+        return None
+
 
 class _FailingTracer:
     """Fake `RepairTraceTracer`: tracing always fails; invoke still runs once."""
@@ -84,6 +87,9 @@ class _FailingTracer:
         return invoke(), None
 
     def tag_trace(self, trace_id: str, tags: dict[str, str]) -> None:
+        raise AssertionError("should not be called: trace_id was never produced")
+
+    def get_llm_usage(self, trace_id: str) -> dict[str, Any] | None:
         raise AssertionError("should not be called: trace_id was never produced")
 
 
@@ -96,6 +102,9 @@ class _ExplodingTracer:
         raise RuntimeError("a buggy tracer implementation raised instead of returning a tuple")
 
     def tag_trace(self, trace_id: str, tags: dict[str, str]) -> None:
+        raise AssertionError("should not be called")
+
+    def get_llm_usage(self, trace_id: str) -> dict[str, Any] | None:
         raise AssertionError("should not be called")
 
 
@@ -221,7 +230,12 @@ def test_run_tracker_and_trace_tracer_coexist_independently(tmp_path: Path) -> N
             return TrackingOutcome(success=True, run_id="run-123")
 
         def log_metrics(
-            self, run_id: str, *, latency_ms: int | None = None, token_usage: int | None = None
+            self,
+            run_id: str,
+            *,
+            latency_ms: int | None = None,
+            token_usage: int | None = None,
+            trace_id: str | None = None,
         ) -> TrackingOutcome:
             return TrackingOutcome(success=True, run_id=run_id)
 

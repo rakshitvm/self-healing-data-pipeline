@@ -73,7 +73,12 @@ class _SucceedingTracker:
         return TrackingOutcome(success=True, run_id=self.run_id)
 
     def log_metrics(
-        self, run_id: str, *, latency_ms: int | None = None, token_usage: int | None = None
+        self,
+        run_id: str,
+        *,
+        latency_ms: int | None = None,
+        token_usage: int | None = None,
+        trace_id: str | None = None,
     ) -> TrackingOutcome:
         self.metrics.append((run_id, latency_ms, token_usage))
         return TrackingOutcome(success=True, run_id=run_id)
@@ -90,7 +95,12 @@ class _AlwaysFailingTracker:
         return TrackingOutcome(success=False, error="simulated MLflow outage")
 
     def log_metrics(
-        self, run_id: str, *, latency_ms: int | None = None, token_usage: int | None = None
+        self,
+        run_id: str,
+        *,
+        latency_ms: int | None = None,
+        token_usage: int | None = None,
+        trace_id: str | None = None,
     ) -> TrackingOutcome:
         raise AssertionError("should not be called: start_run already failed")
 
@@ -107,7 +117,12 @@ class _ExplodingTracker:
         raise RuntimeError("a buggy tracker implementation raised instead of returning a TrackingOutcome")
 
     def log_metrics(
-        self, run_id: str, *, latency_ms: int | None = None, token_usage: int | None = None
+        self,
+        run_id: str,
+        *,
+        latency_ms: int | None = None,
+        token_usage: int | None = None,
+        trace_id: str | None = None,
     ) -> TrackingOutcome:
         raise AssertionError("should not be called")
 

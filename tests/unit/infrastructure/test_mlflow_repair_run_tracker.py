@@ -5,7 +5,7 @@ MlflowClient`. No MLflow tracking server, real or local, is started or
 contacted.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 from self_healing_pipeline.domain.interfaces.services.repair_run_tracker import (
@@ -99,6 +99,66 @@ def test_log_metrics_omits_absent_values() -> None:
     tracker.log_metrics("run-123", latency_ms=None, token_usage=None)
 
     client.log_metric.assert_not_called()
+
+
+def test_log_metrics_derives_real_usage_and_cost_from_trace_id() -> None:
+    """`trace_id` must produce real, per-metric Run values — not a single
+    combined number — sourced from `aggregate_chat_model_usage` (i.e.
+    MLflow's own already-captured CHAT_MODEL span data), never invented."""
+    client = MagicMock()
+    tracker = MlflowRepairRunTracker(client=client, experiment_name="tier1-csv-repair")
+
+    with patch(
+        "self_healing_pipeline.infrastructure.mlflow.mlflow_repair_run_tracker."
+        "aggregate_chat_model_usage",
+        return_value={
+            "prompt_tokens": 243,
+            "completion_tokens": 17,
+            "total_tokens": 260,
+            "total_cost_usd": 0.0001568,
+        },
+    ) as mock_aggregate:
+        outcome = tracker.log_metrics("run-123", latency_ms=250, trace_id="tr-abc")
+
+    assert outcome == TrackingOutcome(success=True, run_id="run-123")
+    mock_aggregate.assert_called_once_with("tr-abc")
+    client.log_metric.assert_any_call("run-123", "latency_ms", 250.0)
+    client.log_metric.assert_any_call("run-123", "input_tokens", 243.0)
+    client.log_metric.assert_any_call("run-123", "output_tokens", 17.0)
+    client.log_metric.assert_any_call("run-123", "total_tokens", 260.0)
+    client.log_metric.assert_any_call("run-123", "cost_usd", 0.0001568)
+
+
+def test_log_metrics_with_trace_id_but_no_usage_logs_only_latency() -> None:
+    """When the trace has no CHAT_MODEL span (e.g. no LLM was ever
+    called), no token/cost metric is logged — never fabricated."""
+    client = MagicMock()
+    tracker = MlflowRepairRunTracker(client=client, experiment_name="tier1-csv-repair")
+
+    with patch(
+        "self_healing_pipeline.infrastructure.mlflow.mlflow_repair_run_tracker."
+        "aggregate_chat_model_usage",
+        return_value=None,
+    ):
+        tracker.log_metrics("run-123", latency_ms=250, trace_id="tr-abc")
+
+    client.log_metric.assert_called_once_with("run-123", "latency_ms", 250.0)
+
+
+def test_explicit_token_usage_takes_precedence_over_trace_id() -> None:
+    """An explicit `token_usage` override must win — `trace_id` is only
+    consulted when the caller hasn't already supplied a real value."""
+    client = MagicMock()
+    tracker = MlflowRepairRunTracker(client=client, experiment_name="tier1-csv-repair")
+
+    with patch(
+        "self_healing_pipeline.infrastructure.mlflow.mlflow_repair_run_tracker."
+        "aggregate_chat_model_usage"
+    ) as mock_aggregate:
+        tracker.log_metrics("run-123", token_usage=99, trace_id="tr-abc")
+
+    mock_aggregate.assert_not_called()
+    client.log_metric.assert_called_once_with("run-123", "token_usage", 99.0)
 
 
 def test_log_metrics_failure_is_best_effort_and_never_raises() -> None:
