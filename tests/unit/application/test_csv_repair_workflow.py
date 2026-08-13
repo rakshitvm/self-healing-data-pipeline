@@ -169,6 +169,63 @@ def test_single_column_malformation_flows_through_workflow(tmp_path: Path) -> No
     assert result["repair_result"] is not None and result["repair_result"].success is True
 
 
+def test_header_detection_flows_through_full_workflow(tmp_path: Path) -> None:
+    """Real detector + real executor: a leading junk title line is
+    genuinely resolved by skipping it via `header_row`. Matches the
+    proposal a real Groq run produced for this exact fixture."""
+    file_path = _write(
+        tmp_path,
+        "header_detection.csv",
+        "Sales Report - Q3 2026\nid,name,value\n1,alpha,10\n2,beta,20\n3,gamma,30\n",
+    )
+    graph = build_csv_repair_workflow(
+        detector=LocalCsvFailureDetector(),
+        executor=PandasCsvRepairExecutor(),
+        llm_port=_FakeProposalPort(
+            {"delimiter": ",", "encoding": "utf-8", "header_row": 1, "engine": "python"}
+        ),
+    )
+
+    result = graph.invoke(build_initial_state(file_path))
+
+    assert result["failure_class"] == FailureClass.HEADER_DETECTION
+    assert result["status"] == RepairEpisodeStatus.SUCCEEDED
+    assert result["repair_result"] is not None
+    assert result["repair_result"].success is True
+    assert result["verification_result"] is not None
+    assert result["verification_result"].success is True
+
+
+def test_engine_selection_flows_through_full_workflow(tmp_path: Path) -> None:
+    """Real detector + real executor: a row with a missing trailing field
+    (fewer fields than the header, not more) is genuinely repairable —
+    pandas pads the gap with NaN — but only with `engine="python"`/`"c"`,
+    not `"pyarrow"` (verified separately: pyarrow raises `ParserError` on
+    this exact fixture). Matches the proposal a real Groq run produced.
+    """
+    file_path = _write(
+        tmp_path,
+        "engine_selection.csv",
+        "id,name,value\n1,alpha,10\n2,beta\n3,gamma,30\n",
+    )
+    graph = build_csv_repair_workflow(
+        detector=LocalCsvFailureDetector(),
+        executor=PandasCsvRepairExecutor(),
+        llm_port=_FakeProposalPort(
+            {"delimiter": ",", "encoding": "utf-8", "header_row": 0, "engine": "python"}
+        ),
+    )
+
+    result = graph.invoke(build_initial_state(file_path))
+
+    assert result["failure_class"] == FailureClass.ENGINE_SELECTION
+    assert result["status"] == RepairEpisodeStatus.SUCCEEDED
+    assert result["repair_result"] is not None
+    assert result["repair_result"].success is True
+    assert result["verification_result"] is not None
+    assert result["verification_result"].success is True
+
+
 def test_valid_csv_repair_params_reaches_apply(tmp_path: Path) -> None:
     file_path = _write(tmp_path, "wrong_delimiter.csv", WRONG_DELIMITER_CSV)
     executor = _FakeCsvRepairExecutor(CsvExecutionOutcome(success=True, confidence=1.0))
