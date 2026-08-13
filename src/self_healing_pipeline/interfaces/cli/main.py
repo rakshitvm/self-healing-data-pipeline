@@ -66,6 +66,7 @@ from self_healing_pipeline.domain.interfaces.services.csv_failure_detector impor
 from self_healing_pipeline.domain.interfaces.services.csv_repair_executor import (
     CsvRepairExecutor,
 )
+from self_healing_pipeline.domain.interfaces.services.csv_approval_port import CsvHumanApprovalPort
 from self_healing_pipeline.domain.interfaces.services.csv_repair_proposal_port import (
     CsvRepairProposalPort,
 )
@@ -116,6 +117,9 @@ from self_healing_pipeline.infrastructure.schema.pandas_schema_inspector import 
 from self_healing_pipeline.infrastructure.schema.postgres_schema_migration_store import (
     PostgresSchemaMigrationStore,
 )
+from self_healing_pipeline.interfaces.cli.click_csv_human_approval import (
+    ClickCsvHumanApprovalPort,
+)
 from self_healing_pipeline.interfaces.cli.click_human_approval import ClickHumanApprovalPort
 
 _FAILURE_CLASS_TO_ERROR: dict[FailureClass, type[CsvRepairError]] = {
@@ -135,14 +139,20 @@ def build_error_router(
     audit_store: RepairAuditStore,
     run_tracker: RepairRunTracker | None = None,
     trace_tracer: RepairTraceTracer | None = None,
+    approval_port: CsvHumanApprovalPort | None = None,
 ) -> ErrorRouter:
     """Wire the real Tier 1 pipeline from injected ports.
 
     Pure dependency injection — no settings are read and no infrastructure
     is constructed here, which is exactly what makes this function usable
-    with fakes in tests.
+    with fakes in tests. `approval_port` is only ever consulted for a
+    genuine multi-failure repair (see `csv_repair_workflow`'s
+    `human_approval` node) — omitting it reproduces prior,
+    single-failure-only behavior exactly.
     """
-    graph = build_csv_repair_workflow(detector=detector, executor=executor, llm_port=llm_port)
+    graph = build_csv_repair_workflow(
+        detector=detector, executor=executor, llm_port=llm_port, approval_port=approval_port
+    )
     agent = LangGraphCsvRepairAgent(
         graph, audit_store=audit_store, run_tracker=run_tracker, trace_tracer=trace_tracer
     )
@@ -173,6 +183,7 @@ def build_production_error_router() -> ErrorRouter:
         audit_store=PostgresRepairAuditStore.from_settings(settings.database),
         run_tracker=MlflowRepairRunTracker.from_settings(settings.mlflow),
         trace_tracer=MlflowRepairTraceTracer(),
+        approval_port=ClickCsvHumanApprovalPort(),
     )
 
 

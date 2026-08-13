@@ -102,6 +102,16 @@ def _trace_payload(trace_id: str | None) -> dict[str, Any]:
     return {"mlflow_trace_id": trace_id} if trace_id is not None else {}
 
 
+def _multi_failure_payload(state: CsvRepairWorkflowState) -> dict[str, Any]:
+    """`failure_classes` on every event when a genuine multi-failure
+    episode is in progress; omitted entirely for the ordinary
+    single-failure case, so existing payload shapes are unchanged."""
+    failure_classes = state["failure_classes"]
+    if len(failure_classes) <= 1:
+        return {}
+    return {"failure_classes": sorted(c.value for c in failure_classes)}
+
+
 class _TrackingContext(TypedDict):
     """The per-episode tracking/tracing info threaded onto every recorded event."""
 
@@ -130,6 +140,7 @@ def _propose_event(
             "raw_proposal": state["proposed_params"],
             **_tracking_payload(tracking_error),
             **_trace_payload(trace_id),
+            **_multi_failure_payload(state),
         },
     )
 
@@ -155,6 +166,7 @@ def _validate_event(
             "validation_errors": state["validation_errors"],
             **_tracking_payload(tracking_error),
             **_trace_payload(trace_id),
+            **_multi_failure_payload(state),
         },
     )
 
@@ -184,6 +196,7 @@ def _apply_event(
             "validation_errors": result.validation_errors,
             **_tracking_payload(tracking_error),
             **_trace_payload(trace_id),
+            **_multi_failure_payload(state),
         },
     )
 
@@ -211,6 +224,32 @@ def _reverify_event(
             "validation_errors": outcome.validation_errors,
             **_tracking_payload(tracking_error),
             **_trace_payload(trace_id),
+            **_multi_failure_payload(state),
+        },
+    )
+
+
+def _human_approval_event(
+    state: CsvRepairWorkflowState,
+    *,
+    mlflow_run_id: str | None,
+    latency_ms: int | None,
+    tracking_error: str | None,
+    trace_id: str | None,
+) -> RepairEvent:
+    approved = state["human_approved"]
+    return RepairEvent(
+        episode_id=state["episode_id"],
+        node="human_approval",
+        status="approved" if approved else "rejected",
+        error_type=_error_type(state["failure_class"]),
+        mlflow_run_id=mlflow_run_id,
+        latency_ms=latency_ms,
+        payload={
+            "human_approved": approved,
+            **_tracking_payload(tracking_error),
+            **_trace_payload(trace_id),
+            **_multi_failure_payload(state),
         },
     )
 
@@ -293,6 +332,8 @@ def run_audited_csv_repair(
     if final_state["proposed_params"] is not None:
         audit_store.record_event(_propose_event(final_state, **event_kwargs))
     audit_store.record_event(_validate_event(final_state, **event_kwargs))
+    if final_state["human_approved"] is not None:
+        audit_store.record_event(_human_approval_event(final_state, **event_kwargs))
     if final_state["repair_result"] is not None:
         audit_store.record_event(_apply_event(final_state, **event_kwargs))
     if final_state["verification_result"] is not None:
