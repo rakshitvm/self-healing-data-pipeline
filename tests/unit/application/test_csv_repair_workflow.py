@@ -199,7 +199,9 @@ def test_single_column_malformation_flows_through_workflow(tmp_path: Path) -> No
         "single_column.csv",
         "id  name    value\n1   alpha   10\n2  beta     20\n3    gamma  30\n",
     )
-    executor = _FakeCsvRepairExecutor(CsvExecutionOutcome(success=True, confidence=1.0))
+    executor = _FakeCsvRepairExecutor(
+        CsvExecutionOutcome(success=True, confidence=1.0, output_path=f"{file_path}.repaired")
+    )
     graph = build_csv_repair_workflow(
         detector=LocalCsvFailureDetector(),
         executor=executor,
@@ -275,7 +277,9 @@ def test_engine_selection_flows_through_full_workflow(tmp_path: Path) -> None:
 
 def test_valid_csv_repair_params_reaches_apply(tmp_path: Path) -> None:
     file_path = _write(tmp_path, "wrong_delimiter.csv", WRONG_DELIMITER_CSV)
-    executor = _FakeCsvRepairExecutor(CsvExecutionOutcome(success=True, confidence=1.0))
+    executor = _FakeCsvRepairExecutor(
+        CsvExecutionOutcome(success=True, confidence=1.0, output_path=f"{file_path}.repaired")
+    )
     graph = build_csv_repair_workflow(
         detector=LocalCsvFailureDetector(),
         executor=executor,
@@ -443,14 +447,18 @@ def test_single_failure_without_approval_port_fails_safe_not_auto_apply(tmp_path
     assert result["repair_result"] is None
 
 
-# --- Approved repairs must physically rewrite the file (live-demo bug) --
+# --- The source file is never modified; repairs land in a separate ------
+# --- output file (live-demo bug: apply used to overwrite the source). ---
 
 
-def test_approved_single_failure_repair_physically_rewrites_the_file(tmp_path: Path) -> None:
-    """The exact bug found during the live demo: `apply` used to only
-    re-parse the file in memory with corrected params, never writing
-    anything back. An approved repair must now genuinely mutate the file
-    on disk into a valid canonical CSV, with the original data preserved."""
+def test_approved_single_failure_repair_creates_output_and_leaves_source_untouched(
+    tmp_path: Path,
+) -> None:
+    """The exact bug found during the live demo: `apply` used to
+    physically overwrite the source file in place. An approved repair
+    must instead create a *separate* repaired output file, with the
+    source left byte-for-byte identical, and the corrected data
+    genuinely preserved in the new output file."""
     file_path = _write(tmp_path, "wrong_delimiter.csv", WRONG_DELIMITER_CSV)
     graph = build_csv_repair_workflow(
         detector=LocalCsvFailureDetector(),
@@ -464,12 +472,24 @@ def test_approved_single_failure_repair_physically_rewrites_the_file(tmp_path: P
     assert result["status"] == RepairEpisodeStatus.SUCCEEDED
     assert result["repair_result"] is not None
     assert result["repair_result"].applied is True
+    assert result["repair_result"].source_path == file_path
 
-    on_disk = Path(file_path).read_text(encoding="utf-8")
-    assert on_disk != WRONG_DELIMITER_CSV  # the physical file was rewritten, not just re-parsed
-    assert ";" not in on_disk  # the malformed delimiter is gone from disk
+    # The source is completely untouched.
+    assert Path(file_path).read_text(encoding="utf-8") == WRONG_DELIMITER_CSV
 
-    repaired = pd.read_csv(file_path)  # plain defaults: the file is now canonical
+    # A separate repaired output file exists, preserving the filename.
+    output_path = result["repair_result"].output_path
+    assert output_path is not None
+    assert output_path != file_path
+    assert Path(output_path).name == "wrong_delimiter.csv"
+    assert result["output_path"] == output_path
+    assert result["verification_result"] is not None
+    assert result["verification_result"].success is True
+
+    on_disk_output = Path(output_path).read_text(encoding="utf-8")
+    assert ";" not in on_disk_output  # the malformed delimiter is gone from the output
+
+    repaired = pd.read_csv(output_path)  # plain defaults: the output is canonical
     assert list(repaired.columns) == ["id", "name", "value"]
     assert repaired.shape == (3, 3)
     assert repaired.iloc[0].tolist() == [1, "alpha", 10]
@@ -491,6 +511,9 @@ def test_rejected_repair_leaves_file_byte_for_byte_unchanged(tmp_path: Path) -> 
 
     assert result["status"] == RepairEpisodeStatus.REJECTED
     assert Path(file_path).read_bytes() == original_bytes
+    # No repaired output is created for a rejected repair.
+    assert result["output_path"] is None
+    assert not (tmp_path / "repaired").exists()
 
 
 def test_tool_node_is_present_in_compiled_graph() -> None:

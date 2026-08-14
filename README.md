@@ -74,9 +74,14 @@ trace correctly shows its internal nodes nested under the parent.
 - **Human approval**: required before apply for every non-healthy
   repair, single-failure or multi-failure (`human_approval` node) —
   nothing auto-applies.
-- **Apply/reverify**: `PandasCsvRepairExecutor` — same validated params
-  applied via one `pd.read_csv(...)` call, then independently
-  re-verified.
+- **Apply/reverify**: `PandasCsvRepairExecutor` — **the source file is
+  never modified.** `apply` reads the source with the validated params
+  and, on success, writes a *separate* repaired output file at
+  `<source directory>/repaired/<source filename>` (creating that
+  directory if needed); `reverify` then independently re-checks that
+  output file, read-only. If the computed output path would ever
+  collide with the source path, the repair fails safely instead of
+  writing anything.
 
 ### Tier 2 — Schema repair
 
@@ -117,8 +122,9 @@ Healthy:
 
 Tier 1:
   diagnose -> propose -> validate -> human_approval
-      approved -> apply -> reverify -> success
-      rejected -> set_rejected, no mutation
+      approved -> apply (creates a separate repaired output file;
+                          the source is never modified) -> reverify -> success
+      rejected -> set_rejected, no output file created
 
 Tier 2:
   detect/diff -> propose/resolve -> validate/confidence -> human_approval
@@ -326,6 +332,8 @@ printf 'id,name,value\n1,a,10\n2,b\n3,c,30\n' > /tmp/f4.csv
 printf 'id:name:age\n1:Alice:30\n2:Bob:25\n' > /tmp/f5.csv
 
 PYTHONPATH=src python -m self_healing_pipeline.interfaces.cli.main repair /tmp/f1.csv
+# -> /tmp/f1.csv itself is left untouched; the repaired CSV is written to
+#    /tmp/repaired/f1.csv (printed as `output_path` in the CLI output)
 ```
 
 ### Tier 1 — multi-error

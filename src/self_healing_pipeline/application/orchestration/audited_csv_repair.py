@@ -194,6 +194,8 @@ def _apply_event(
         payload={
             "message": result.message,
             "validation_errors": result.validation_errors,
+            "source_path": result.source_path,
+            "output_path": result.output_path,
             **_tracking_payload(tracking_error),
             **_trace_payload(trace_id),
             **_multi_failure_payload(state),
@@ -222,6 +224,7 @@ def _reverify_event(
         payload={
             "message": outcome.message,
             "validation_errors": outcome.validation_errors,
+            "output_path": state["output_path"],
             **_tracking_payload(tracking_error),
             **_trace_payload(trace_id),
             **_multi_failure_payload(state),

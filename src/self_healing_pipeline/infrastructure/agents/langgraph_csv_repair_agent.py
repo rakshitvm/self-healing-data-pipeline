@@ -87,6 +87,7 @@ class LangGraphCsvRepairAgent:
             return RepairResult(
                 success=True,
                 applied=False,
+                source_path=error.file_path,
                 message="No CSV failure detected; the file already parses correctly.",
             )
 
@@ -94,6 +95,7 @@ class LangGraphCsvRepairAgent:
             success=False,
             applied=False,
             validation_errors=final_state["validation_errors"],
+            source_path=error.file_path,
             message=(
                 f"Repair for {final_state['failure_class'].value} did not reach "
                 "the apply step."

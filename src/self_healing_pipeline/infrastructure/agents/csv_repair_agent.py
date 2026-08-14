@@ -85,4 +85,6 @@ class CsvRepairAgent:
             prescription=prescription,
             validation_errors=outcome.validation_errors,
             message=outcome.message,
+            source_path=error.file_path,
+            output_path=outcome.output_path,
         )

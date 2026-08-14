@@ -52,12 +52,19 @@ Node responsibilities:
   as a fail-safe — is treated as an automatic rejection whenever this
   node is reached, so approval can never be silently bypassed.
 - `apply`: delegates to `CsvRepairExecutor.execute` with the validated
-  prescription — no pandas logic is duplicated here. `execute` physically
-  rewrites the file into canonical form; `RepairResult.applied` is only
-  ever `True` once that rewrite has actually happened, never merely
-  because the corrected prescription parsed in memory.
-- `reverify`: an independent, read-only post-apply check, via
-  `CsvRepairExecutor.verify` — it never writes to the file. No LLM call.
+  prescription — no pandas logic is duplicated here. `execute` **never
+  modifies the source file** (`state["file_path"]`); on success it
+  writes a *separate* repaired output file and reports its path as
+  `state["output_path"]` / `RepairResult.output_path`.
+  `RepairResult.applied` is only ever `True` once that new file has
+  actually been written, never merely because the corrected prescription
+  parsed in memory.
+- `reverify`: an independent, read-only check of the *repaired output*
+  file (`state["output_path"]`), via `CsvRepairExecutor.verify` — never
+  the source, and it never writes anything. If `apply` produced no
+  output (the prescription still didn't resolve the file, or the write
+  itself failed), `reverify` reports failure without touching any file.
+  No LLM call.
 
 Retries are bounded by `max_retries` (checked before every retry) and are
 driven by two conditional edges (after `validate` and after `reverify`),
@@ -142,6 +149,7 @@ class CsvRepairWorkflowState(TypedDict):
     validation_errors: list[str]
     repair_result: RepairResult | None
     verification_result: CsvExecutionOutcome | None
+    output_path: str | None
     retry_count: int
     max_retries: int
     status: RepairEpisodeStatus
@@ -168,6 +176,7 @@ def build_initial_state(
         validation_errors=[],
         repair_result=None,
         verification_result=None,
+        output_path=None,
         retry_count=0,
         max_retries=max_retries,
         status=RepairEpisodeStatus.PENDING,
@@ -391,16 +400,20 @@ def _make_apply_node(executor: CsvRepairExecutor) -> Any:
             prescription=params,
             validation_errors=outcome.validation_errors,
             message=outcome.message,
+            source_path=state["file_path"],
+            output_path=outcome.output_path,
         )
 
         logger.info(
             "node_completed",
             success=result.success,
             applied=result.applied,
+            source_path=result.source_path,
+            output_path=result.output_path,
             message=result.message,
         )
 
-        return {"repair_result": result}
+        return {"repair_result": result, "output_path": outcome.output_path}
 
     return apply
 
@@ -411,11 +424,24 @@ def _make_reverify_node(executor: CsvRepairExecutor) -> Any:
 
         params = state["validated_params"]
         assert params is not None  # guaranteed by _route_after_validation
-        outcome = executor.verify(state["file_path"], params)
+        output_path = state["output_path"]
+        if output_path is None:
+            # apply ran (this node is always reached after apply, win or
+            # lose) but produced no repaired output — nothing exists to
+            # independently re-check. Report failure without touching
+            # any file; never falls back to re-checking the source.
+            outcome = CsvExecutionOutcome(
+                success=False,
+                validation_errors=["no_repaired_output_to_verify"],
+                message="No repaired output file was created by apply; nothing to reverify.",
+            )
+        else:
+            outcome = executor.verify(output_path, params)
 
         logger.info(
             "node_completed",
             success=outcome.success,
+            output_path=output_path,
             message=outcome.message,
         )
 

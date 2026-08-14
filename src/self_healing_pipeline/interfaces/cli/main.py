@@ -231,6 +231,10 @@ def repair(file_path: str) -> None:
     click.echo(f"failure_class: {failure_class.value}")
     click.echo(f"success: {result.success}")
     click.echo(f"applied: {result.applied}")
+    if result.source_path is not None:
+        click.echo(f"source_path: {result.source_path}")
+    if result.output_path is not None:
+        click.echo(f"output_path: {result.output_path}")
     if result.prescription is not None:
         click.echo(f"prescription: {result.prescription.model_dump_json()}")
     click.echo(f"message: {result.message}")

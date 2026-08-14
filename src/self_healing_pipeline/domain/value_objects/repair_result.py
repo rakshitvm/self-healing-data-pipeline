@@ -21,3 +21,5 @@ class RepairResult(BaseModel):
     prescription: CsvRepairParams | None = None
     validation_errors: list[str] = Field(default_factory=list)
     message: str | None = None
+    source_path: str | None = None
+    output_path: str | None = None
