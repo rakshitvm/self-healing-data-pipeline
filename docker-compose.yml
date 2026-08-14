@@ -59,6 +59,72 @@ services:
       retries: 10
       start_period: 10s
 
+  # --- Observability: centralized application log search (Elasticsearch +
+  # Kibana), fed by Filebeat tailing the app's existing structured JSON log
+  # file. This is additive: MLflow remains the LLM/workflow tracing system
+  # of record, PostgreSQL remains the repair audit system of record — this
+  # stack only indexes the application's existing structured *logs* for
+  # search/filtering/dashboards. Security is left at its 7.x default (off)
+  # since this is local-development-only, matching every other service
+  # above (no production credentials here either).
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.0
+    container_name: self-healing-pipeline-elasticsearch
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "${ELASTICSEARCH_PORT:-9200}:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f -s http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:7.17.0
+    container_name: self-healing-pipeline-kibana
+    restart: unless-stopped
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    ports:
+      - "${KIBANA_PORT:-5601}:5601"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f -s http://localhost:5601/api/status || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:7.17.0
+    container_name: self-healing-pipeline-filebeat
+    restart: unless-stopped
+    user: root
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    volumes:
+      - ./docker/filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - ./logs:/logs:ro
+      - filebeat_data:/usr/share/filebeat/data
+    command: ["--strict.perms=false", "-e"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f -s http://localhost:5066/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
 volumes:
   postgres_data:
   mlflow_artifacts:
+  es_data:
+  filebeat_data:

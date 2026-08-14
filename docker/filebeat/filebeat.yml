@@ -1,0 +1,62 @@
+# Filebeat configuration for the Self-Healing Data Pipeline's Elasticsearch
+# + Kibana observability stack (local development only).
+#
+# The application already writes structured, one-JSON-object-per-line logs
+# to logs/self_healing_pipeline.log (see
+# src/self_healing_pipeline/infrastructure/logging/logger.py, unmodified).
+# Filebeat's own ndjson parser decodes each line directly into top-level
+# fields (`keys_under_root`) — no Logstash/grok pipeline is needed or used.
+
+filebeat.inputs:
+  - type: filestream
+    id: self-healing-pipeline-app-logs
+    enabled: true
+    paths:
+      - /logs/self_healing_pipeline.log
+    parsers:
+      - ndjson:
+          keys_under_root: true
+          overwrite_keys: true
+          add_error_key: true
+    # The app's own `event` and `agent` fields collide with Filebeat/ECS's
+    # own reserved top-level fields:
+    #   - `event` is mapped as an object by Filebeat's auto-generated
+    #     index template (ECS `event.*` field group), so the app's plain
+    #     string value ("node_completed") is rejected outright
+    #     (mapper_parsing_exception) and the whole document is dropped.
+    #   - `agent` is populated by Filebeat itself with the shipping
+    #     beat's own identity (agent.id/name/type/version), silently
+    #     overwriting the app's "CsvRepairAgent" string value rather than
+    #     erroring — verified directly against a real indexed document
+    #     during implementation.
+    # Renamed here, at the input level, so this runs immediately after
+    # parsing and before Filebeat's own beat/ECS metadata is attached to
+    # the event; the app's actual log format on disk is unchanged.
+    processors:
+      - rename:
+          fields:
+            - from: "event"
+              to: "app_event"
+            - from: "agent"
+              to: "app_agent"
+          ignore_missing: true
+          fail_on_error: false
+
+# ILM/dashboards management adds moving parts unnecessary for this local,
+# additive observability task — kept off to match "minimum architecture."
+setup.ilm.enabled: false
+setup.template.name: "self-healing-pipeline-logs"
+setup.template.pattern: "self-healing-pipeline-logs-*"
+
+output.elasticsearch:
+  hosts: ["http://elasticsearch:9200"]
+  index: "self-healing-pipeline-logs-%{+yyyy.MM.dd}"
+
+logging.level: info
+logging.to_stderr: true
+
+# Elastic's own documented Docker healthcheck pattern: expose Filebeat's
+# HTTP monitoring endpoint so docker-compose.yml can curl it.
+http.enabled: true
+http.host: "0.0.0.0"
+http.port: 5066

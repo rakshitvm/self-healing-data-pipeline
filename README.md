@@ -191,15 +191,96 @@ same `openai`-SDK-based call pattern MLflow autologs identically.
   authoritative — MLflow is best-effort observability on top) and
   `schema_migration_events` (Tier 2, best-effort mirror of the JSON
   history, which is authoritative for Tier 2).
+- **Elasticsearch + Kibana (centralized log search)**: indexes the
+  application's *existing* structured JSON logs — nothing new is
+  logged, and `infrastructure/logging/logger.py` is unmodified. This is
+  purely additive operational-log search/filtering on top of the same
+  logs that already go to stdout and `logs/self_healing_pipeline.log`.
+  It does not replace or overlap with MLflow (LLM tracing, spans,
+  prompts/responses, token/cost) or PostgreSQL (repair audit/episodes),
+  which remain the systems of record for those concerns unchanged. See
+  **Log search (Elasticsearch + Kibana)** below.
 
 ## Docker setup
 
 ```bash
-docker compose up -d          # PostgreSQL + self-hosted MLflow
-docker compose ps             # both should show "healthy"
+docker compose up -d          # PostgreSQL, self-hosted MLflow, Elasticsearch, Kibana, Filebeat
+docker compose ps             # all five should show healthy
+PYTHONPATH=src python scripts/provision_kibana.py   # recreate the Kibana dashboard/saved search (idempotent)
 ```
 MLflow UI: http://localhost:5000. PostgreSQL: `localhost:5432` (see
-`.env.example` for credentials).
+`.env.example` for credentials). Elasticsearch:
+http://localhost:9200. Kibana: http://localhost:5601.
+
+## Log search (Elasticsearch + Kibana)
+
+Centralized search/filtering over the application's own structured JSON
+logs — a separate concern from MLflow (LLM tracing) and PostgreSQL
+(repair audit), which this does not replace or duplicate.
+
+**Why Filebeat, not direct-to-Elasticsearch logging**: the application
+already writes structured JSON to `logs/self_healing_pipeline.log`
+(`infrastructure/logging/logger.py`, unmodified — stdout logging is
+also preserved). The CLI runs on the host, not inside Docker, so the
+simplest path that avoids adding an Elasticsearch client (and a new
+runtime dependency/coupling) directly into the application's logging
+path is to let **Filebeat** tail that existing file and ship it to
+Elasticsearch. **Logstash is not used** — Filebeat decodes each
+already-JSON line natively (`ndjson` parser, `keys_under_root: true`),
+so no separate parsing pipeline is needed.
+
+Two of the application's own JSON field names collide with fields
+Filebeat/Elasticsearch reserve for their own metadata and are renamed
+on ingest (`docker/filebeat/filebeat.yml`) — the on-disk log format
+itself is untouched:
+- `event` (a string, e.g. `"node_completed"`) → indexed as `app_event`
+  (Elasticsearch's auto-generated template maps `event` as an object
+  for Filebeat's own ECS `event.*` fields; a string there is rejected).
+- `agent` (a string, e.g. `"CsvRepairAgent"`) → indexed as `app_agent`
+  (Filebeat populates its own `agent.*` object with the shipping
+  beat's identity, which otherwise silently overwrites the app's value).
+
+**Searchable/filterable fields** (Kibana index pattern
+`self-healing-pipeline-logs-*`): `trace_id`, `table`, `level`,
+`failure_class`, `failure_classes`, `node`, `app_agent`, `app_event`,
+`success`, `applied`, `timestamp` (original app timestamp) plus
+Kibana's own `@timestamp`. Token/cost fields are **not** present in
+these logs (they are only ever written to MLflow — see above) and are
+intentionally not part of this dashboard.
+
+**Kibana objects are version-controlled, not ad hoc.** They're exported
+to `docker/kibana/saved_objects.ndjson` (index pattern
+`self-healing-pipeline-logs`, 3 visualizations, the dashboard, and the
+saved search — real Kibana `_export` output, not hand-written) and
+recreated deterministically by `scripts/provision_kibana.py`, which
+waits for Kibana to report healthy, then imports the file via the
+saved-objects `_import` API with `overwrite=true` (stdlib-only, no new
+dependency; safe/idempotent to re-run). This is what makes the
+dashboard reproducible from a fresh `docker compose up -d` rather than
+existing only in a live Kibana's `.kibana` index.
+
+Provisioned objects: dashboard **"Self-Healing Pipeline — Operational
+Log Dashboard"**, with panels for repair volume over time (distinct
+`trace_id` count where `app_event:"repair_completed"`), failure-class
+distribution (terms on `failure_class`), and outcome breakdown (terms
+on `node`, filtered to `set_success`/`set_failure`/`set_rejected`);
+plus a separate saved search, **"Repair episode trace explorer"**, for
+finding one episode's full log sequence by `trace_id`. MTTR is not
+included as an automated panel — the data (per-episode `trace_id` +
+per-node `timestamp`) supports a human reading it off the trace
+explorer, but a correct automated aggregation needs a scripted metric
+this implementation does not ship, rather than risk shipping an
+inaccurate one.
+
+```bash
+docker compose up -d
+# generate at least one real log line first (healthy files produce none):
+PYTHONPATH=src python -m self_healing_pipeline.interfaces.cli.main repair <a malformed csv>
+curl http://localhost:9200/_cat/indices/self-healing-pipeline-logs-*?v
+```
+Kibana: http://localhost:5601 → **Dashboard** → "Self-Healing Pipeline —
+Operational Log Dashboard", or **Discover** → "Repair episode trace
+explorer" and filter by `trace_id`.
 
 ## Configuration
 
@@ -213,6 +294,7 @@ Copy `.env.example` to `.env`. Key variables:
 | `DATABASE_URL`, `DB_*` | PostgreSQL connection |
 | `MLFLOW_TRACKING_URI`, `MLFLOW_EXPERIMENT_NAME` | MLflow |
 | `LOG_LEVEL`, `LOG_FORMAT` | Structured logging |
+| `ELASTICSEARCH_PORT`, `KIBANA_PORT` | Optional `docker-compose.yml` port overrides (default 9200/5601); not read by the application itself |
 
 ## Running
 
