@@ -108,6 +108,14 @@ class _ExplodingTracer:
         raise AssertionError("should not be called")
 
 
+class _AlwaysApproveCsvHumanApprovalPort:
+    """Fake `CsvHumanApprovalPort`: always approves — every non-healthy
+    repair now requires explicit human approval before apply."""
+
+    def request_approval(self, request: Any) -> bool:
+        return True
+
+
 def _write(tmp_path: Path, name: str, content: str) -> str:
     path = tmp_path / name
     path.write_text(content, encoding="utf-8")
@@ -119,6 +127,7 @@ def _graph() -> Any:
         detector=LocalCsvFailureDetector(),
         executor=PandasCsvRepairExecutor(),
         llm_port=_FakeProposalPort(VALID_PROPOSAL),
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
 
 
@@ -143,7 +152,7 @@ def test_successful_tracing_calls_invoke_exactly_once_and_stamps_trace_id(tmp_pa
 
     assert result["status"] == RepairEpisodeStatus.SUCCEEDED
     assert tracer.invocations == 1
-    assert len(store.events) == 4
+    assert len(store.events) == 5  # propose, validate, human_approval, apply, reverify
     assert all(e.payload is not None and e.payload.get("mlflow_trace_id") == "tr-xyz" for e in store.events)
 
 

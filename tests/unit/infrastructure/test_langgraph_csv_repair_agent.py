@@ -59,6 +59,14 @@ class _InMemoryAuditStore:
         self.completed.append(episode)
 
 
+class _AlwaysApproveCsvHumanApprovalPort:
+    """Fake `CsvHumanApprovalPort`: always approves — every non-healthy
+    repair now requires explicit human approval before apply."""
+
+    def request_approval(self, request: Any) -> bool:
+        return True
+
+
 class _AlwaysReportsNoFailureDetector:
     """Fake `CsvFailureDetector` that always reports no failure."""
 
@@ -94,7 +102,10 @@ def test_handler_invokes_the_langgraph_workflow(tmp_path: Path) -> None:
     file_path = _write(tmp_path, "wrong_delimiter.csv", WRONG_DELIMITER_CSV)
     llm_port = _FakeProposalPort(VALID_PROPOSAL)
     graph = build_csv_repair_workflow(
-        detector=LocalCsvFailureDetector(), executor=PandasCsvRepairExecutor(), llm_port=llm_port
+        detector=LocalCsvFailureDetector(),
+        executor=PandasCsvRepairExecutor(),
+        llm_port=llm_port,
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
     agent = LangGraphCsvRepairAgent(graph, audit_store=_InMemoryAuditStore())
     error = WrongDelimiterError("bad delimiter", file_path=file_path)
@@ -115,6 +126,7 @@ def test_audited_wrapper_is_invoked(tmp_path: Path) -> None:
         detector=LocalCsvFailureDetector(),
         executor=PandasCsvRepairExecutor(),
         llm_port=_FakeProposalPort(VALID_PROPOSAL),
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
     agent = LangGraphCsvRepairAgent(graph, audit_store=audit_store)
     error = WrongDelimiterError("bad delimiter", file_path=file_path)
@@ -122,7 +134,7 @@ def test_audited_wrapper_is_invoked(tmp_path: Path) -> None:
     agent.handle(error)
 
     assert len(audit_store.episodes) == 1
-    assert len(audit_store.events) == 4
+    assert len(audit_store.events) == 5  # propose, validate, human_approval, apply, reverify
     assert len(audit_store.completed) == 1
 
 
@@ -208,6 +220,7 @@ def test_handle_returns_the_workflows_own_repair_result_object(tmp_path: Path) -
         detector=LocalCsvFailureDetector(),
         executor=PandasCsvRepairExecutor(),
         llm_port=_FakeProposalPort(VALID_PROPOSAL),
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
     agent = LangGraphCsvRepairAgent(graph, audit_store=_InMemoryAuditStore())
     error: PipelineError = WrongDelimiterError("bad delimiter", file_path=file_path)

@@ -42,15 +42,15 @@ Node responsibilities:
 - `validate`: the only thing allowed to turn a raw proposal into a
   `CsvRepairParams` that `apply` may use. An invalid proposal never
   reaches `apply`.
-- `human_approval`: only reached for a genuine multi-failure episode
-  (`len(failure_classes) > 1`) — a single-failure repair auto-applies
-  exactly as it always has. Delegates to the injected
+- `human_approval`: reached for every non-healthy repair — a healthy
+  file still short-circuits at `diagnose` and never reaches this node,
+  but any file with one or more detected failures now requires explicit
+  human approval before `apply`, regardless of whether it's a
+  single-failure or multi-failure episode. Delegates to the injected
   `CsvHumanApprovalPort`; a rejection routes straight to `set_rejected`
-  and `apply` is never called. Omitting `approval_port` (the default)
-  reproduces prior (single-failure-only) behavior exactly, and — as a
-  fail-safe — is treated as an automatic rejection if a multi-failure
-  episode is ever reached without one wired in, so approval can never be
-  silently bypassed.
+  and `apply` is never called. Omitting `approval_port` (the default) —
+  as a fail-safe — is treated as an automatic rejection whenever this
+  node is reached, so approval can never be silently bypassed.
 - `apply`: delegates to `CsvRepairExecutor` with the validated
   prescription — no pandas logic is duplicated here.
 - `reverify`: an independent, deterministic post-apply check, again via
@@ -335,10 +335,12 @@ def _validate(state: CsvRepairWorkflowState) -> dict[str, Any]:
 
 def _route_after_validation(state: CsvRepairWorkflowState) -> str:
     if state["validated_params"] is not None:
-        # Single-failure repairs auto-apply exactly as before (backward
-        # compatible). Only a genuine multi-failure episode requires
-        # human approval before apply.
-        return "human_approval" if len(state["failure_classes"]) > 1 else "apply"
+        # Every non-healthy repair — single-failure or multi-failure —
+        # requires explicit human approval before apply. A healthy file
+        # never reaches this node at all (it short-circuits at
+        # `_route_after_diagnose`), so this does not affect the
+        # "no approval for a healthy file" guarantee.
+        return "human_approval"
     return "retry" if state["retry_count"] < state["max_retries"] else "fail"
 
 
@@ -349,9 +351,9 @@ def _make_human_approval_node(approval_port: CsvHumanApprovalPort | None) -> Any
         assert params is not None  # guaranteed by _route_after_validation
 
         if approval_port is None:
-            # Fail-safe: a multi-failure repair must never silently
-            # bypass approval just because no approval mechanism was
-            # wired in — treat the absence of a port as a rejection.
+            # Fail-safe: a repair must never silently bypass approval
+            # just because no approval mechanism was wired in — treat
+            # the absence of a port as a rejection.
             approved = False
         else:
             request = CsvApprovalRequest(
@@ -474,10 +476,11 @@ def build_csv_repair_workflow(
 ) -> CompiledStateGraph[CsvRepairWorkflowState, None, Any, Any]:
     """Build and compile the Tier 1 CSV repair `StateGraph`.
 
-    `approval_port` is only ever consulted for a genuine multi-failure
-    episode (`len(failure_classes) > 1`) — a single-failure repair
-    auto-applies exactly as it always has, so omitting `approval_port`
-    reproduces prior behavior exactly for every existing caller.
+    `approval_port` is consulted for every non-healthy repair (single- or
+    multi-failure alike) — `apply` is never reached without an explicit
+    approval. Omitting `approval_port` (the default) fails safe: any
+    repair that reaches the `human_approval` node without one wired in
+    is treated as rejected, never silently auto-applied.
 
     `detector`, `executor`, and `llm_port` are injected ports (Dependency
     Inversion) — this function contains no pandas, filesystem repair, or

@@ -71,6 +71,14 @@ class _EvidenceAwareProposalPort:
         return {"delimiter": ",", "encoding": encoding, "header_row": 0, "engine": "python"}
 
 
+class _AlwaysApproveCsvHumanApprovalPort:
+    """Fake `CsvHumanApprovalPort`: always approves — every non-healthy
+    repair now requires explicit human approval before apply."""
+
+    def request_approval(self, request: Any) -> bool:
+        return True
+
+
 def _write_latin1(tmp_path: Path, name: str = "wrong_encoding.csv") -> str:
     path = tmp_path / name
     path.write_bytes(LATIN1_CONTENT.encode("latin-1"))
@@ -85,7 +93,10 @@ def _write(tmp_path: Path, name: str, content: str) -> str:
 
 def _graph(executor: Any, llm_port: Any) -> Any:
     return build_csv_repair_workflow(
-        detector=LocalCsvFailureDetector(), executor=executor, llm_port=llm_port
+        detector=LocalCsvFailureDetector(),
+        executor=executor,
+        llm_port=llm_port,
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
 
 

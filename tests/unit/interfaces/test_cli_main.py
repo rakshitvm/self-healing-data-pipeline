@@ -40,6 +40,14 @@ class _FakeProposalPort:
         return dict(self._payload)
 
 
+class _AlwaysApproveCsvHumanApprovalPort:
+    """Fake `CsvHumanApprovalPort`: always approves — every non-healthy
+    repair now requires explicit human approval before apply."""
+
+    def request_approval(self, request: Any) -> bool:
+        return True
+
+
 class _InMemoryAuditStore:
     def __init__(self) -> None:
         self.episodes: list[RepairEpisode] = []
@@ -86,6 +94,7 @@ def test_end_to_end_wiring_with_fakes_no_external_services(tmp_path: Path) -> No
         executor=PandasCsvRepairExecutor(),
         llm_port=_FakeProposalPort(VALID_PROPOSAL),
         audit_store=audit_store,
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
 
     result = router.route(WrongDelimiterError("bad delimiter", file_path=file_path))
@@ -118,6 +127,7 @@ def test_cli_broken_csv_invokes_the_production_router_wiring(tmp_path: Path) -> 
         executor=PandasCsvRepairExecutor(),
         llm_port=_FakeProposalPort(VALID_PROPOSAL),
         audit_store=_InMemoryAuditStore(),
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
     runner = CliRunner()
 

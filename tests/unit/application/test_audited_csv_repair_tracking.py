@@ -130,6 +130,14 @@ class _ExplodingTracker:
         raise AssertionError("should not be called")
 
 
+class _AlwaysApproveCsvHumanApprovalPort:
+    """Fake `CsvHumanApprovalPort`: always approves — every non-healthy
+    repair now requires explicit human approval before apply."""
+
+    def request_approval(self, request: Any) -> bool:
+        return True
+
+
 def _write(tmp_path: Path, name: str, content: str) -> str:
     path = tmp_path / name
     path.write_text(content, encoding="utf-8")
@@ -141,6 +149,7 @@ def _graph() -> Any:
         detector=LocalCsvFailureDetector(),
         executor=PandasCsvRepairExecutor(),
         llm_port=_FakeProposalPort(VALID_PROPOSAL),
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
 
 
@@ -165,7 +174,7 @@ def test_successful_tracking_stamps_run_id_and_latency_on_every_event(tmp_path: 
     )
 
     assert result["status"] == RepairEpisodeStatus.SUCCEEDED
-    assert len(store.events) == 4
+    assert len(store.events) == 5  # propose, validate, human_approval, apply, reverify
     assert all(e.mlflow_run_id == "run-xyz" for e in store.events)
     assert all(e.latency_ms is not None and e.latency_ms >= 0 for e in store.events)
     assert all("mlflow_tracking_error" not in (e.payload or {}) for e in store.events)
@@ -201,7 +210,7 @@ def test_tracking_failure_is_captured_in_the_audit_trail_not_swallowed(tmp_path:
         _graph(), build_initial_state(file_path), audit_store=store, run_tracker=tracker
     )
 
-    assert len(store.events) == 4
+    assert len(store.events) == 5  # propose, validate, human_approval, apply, reverify
     assert all(e.mlflow_run_id is None for e in store.events)
     assert all(
         e.payload is not None and e.payload.get("mlflow_tracking_error") == "simulated MLflow outage"

@@ -94,19 +94,20 @@ def test_healthy_file_short_circuits_without_llm_or_approval(tmp_path: Path) -> 
     assert approval_port.requests == []
 
 
-def test_single_failure_never_invokes_approval_port(tmp_path: Path) -> None:
-    """Backward compatibility: an ordinary single-failure file must
-    auto-apply exactly as before Tier 1's multi-error support existed —
-    the approval port must never even be consulted."""
+def test_single_failure_also_requires_human_approval(tmp_path: Path) -> None:
+    """An ordinary single-failure file now requires explicit human
+    approval before apply, exactly like a multi-failure episode — the
+    approval port must be consulted, and a rejection must block apply."""
     file_path = _write(tmp_path, "wrong_delimiter.csv", b"id;name;value\n1;alpha;10\n2;beta;20\n")
-    approval_port = _RecordingApprovalPort(approved=False)  # would reject if ever asked
+    approval_port = _RecordingApprovalPort(approved=False)
     graph = _graph(_FakeProposalPort(VALID_PROPOSAL), approval_port)
 
     result = graph.invoke(build_initial_state(file_path))
 
     assert result["failure_classes"] == frozenset({FailureClass.WRONG_DELIMITER})
-    assert approval_port.requests == []
-    assert result["status"] == RepairEpisodeStatus.SUCCEEDED
+    assert len(approval_port.requests) == 1
+    assert result["status"] == RepairEpisodeStatus.REJECTED
+    assert result["repair_result"] is None
 
 
 # --- two simultaneous failures --------------------------------------------

@@ -94,6 +94,14 @@ class _FakeProposalPort:
         return dict(self._payload)
 
 
+class _AlwaysApproveCsvHumanApprovalPort:
+    """Fake `CsvHumanApprovalPort`: always approves — every non-healthy
+    repair now requires explicit human approval before apply."""
+
+    def request_approval(self, request: Any) -> bool:
+        return True
+
+
 class _FailOnceThenSucceedProposalPort:
     """Returns an invalid proposal once, then a valid one — forces a retry."""
 
@@ -180,6 +188,7 @@ def test_real_repair_invocation_creates_a_trace_with_expected_id_and_tags(tmp_pa
         detector=LocalCsvFailureDetector(),
         executor=PandasCsvRepairExecutor(),
         llm_port=_FakeProposalPort(VALID_PROPOSAL),
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
     store = _InMemoryAuditStore()
 
@@ -208,6 +217,7 @@ def test_real_trace_has_expected_spans_with_correct_parent_child_relationships(
         detector=LocalCsvFailureDetector(),
         executor=PandasCsvRepairExecutor(),
         llm_port=_FakeProposalPort(VALID_PROPOSAL),
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
     store = _InMemoryAuditStore()
     run_audited_csv_repair(
@@ -246,6 +256,7 @@ def test_real_tool_span_carries_real_input_and_output(tmp_path: Path) -> None:
         detector=LocalCsvFailureDetector(),
         executor=PandasCsvRepairExecutor(),
         llm_port=_FakeProposalPort(VALID_PROPOSAL),
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
     store = _InMemoryAuditStore()
     run_audited_csv_repair(
@@ -268,7 +279,10 @@ def test_real_trace_shows_retries_as_distinguishable_sibling_spans(tmp_path: Pat
     file_path = _write(tmp_path, "wrong_delimiter.csv", WRONG_DELIMITER_CSV)
     flaky_llm = _FailOnceThenSucceedProposalPort()
     graph = build_csv_repair_workflow(
-        detector=LocalCsvFailureDetector(), executor=PandasCsvRepairExecutor(), llm_port=flaky_llm
+        detector=LocalCsvFailureDetector(),
+        executor=PandasCsvRepairExecutor(),
+        llm_port=flaky_llm,
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
     store = _InMemoryAuditStore()
 
@@ -302,6 +316,7 @@ def test_real_trace_records_exception_on_node_failure(tmp_path: Path) -> None:
         detector=LocalCsvFailureDetector(),
         executor=_RaisingExecutor(),
         llm_port=_FakeProposalPort(VALID_PROPOSAL),
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
     store = _InMemoryAuditStore()
 
@@ -405,6 +420,7 @@ def test_real_llm_span_carries_prompt_response_and_token_usage(
         detector=LocalCsvFailureDetector(),
         executor=PandasCsvRepairExecutor(),
         llm_port=_OpenAiSdkBackedProposalPort(fake_openai_server),
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
     store = _InMemoryAuditStore()
 
@@ -456,6 +472,7 @@ def test_mlflow_unavailable_does_not_block_repair_and_is_bounded(tmp_path: Path)
         detector=LocalCsvFailureDetector(),
         executor=PandasCsvRepairExecutor(),
         llm_port=_FakeProposalPort(VALID_PROPOSAL),
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
     store = _InMemoryAuditStore()
 

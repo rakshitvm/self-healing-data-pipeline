@@ -41,6 +41,14 @@ class _FakeProposalPort:
         return dict(self._payload)
 
 
+class _AlwaysApproveCsvHumanApprovalPort:
+    """Fake `CsvHumanApprovalPort`: always approves — every non-healthy
+    repair now requires explicit human approval before apply."""
+
+    def request_approval(self, request: Any) -> bool:
+        return True
+
+
 class _InMemoryAuditStore:
     """Simple in-memory `RepairAuditStore` fake, for tests."""
 
@@ -101,6 +109,7 @@ def test_successful_repair_attempt_is_recorded(tmp_path: Path) -> None:
         detector=LocalCsvFailureDetector(),
         executor=PandasCsvRepairExecutor(),
         llm_port=_FakeProposalPort(VALID_PROPOSAL),
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
     store = _InMemoryAuditStore()
 
@@ -109,9 +118,9 @@ def test_successful_repair_attempt_is_recorded(tmp_path: Path) -> None:
     assert result["status"] == RepairEpisodeStatus.SUCCEEDED
     assert len(store.episodes) == 1
     assert store.episodes[0].episode_id == result["episode_id"]
-    assert len(store.events) == 4  # propose, validate, apply, reverify
+    assert len(store.events) == 5  # propose, validate, human_approval, apply, reverify
     nodes = [e.node for e in store.events]
-    assert nodes == ["propose", "validate", "apply", "reverify"]
+    assert nodes == ["propose", "validate", "human_approval", "apply", "reverify"]
     assert all(e.episode_id == result["episode_id"] for e in store.events)
     assert len(store.completed) == 1
     assert store.completed[0].status == RepairEpisodeStatus.SUCCEEDED
@@ -148,6 +157,7 @@ def test_event_payloads_carry_json_safe_structured_context(tmp_path: Path) -> No
         detector=LocalCsvFailureDetector(),
         executor=PandasCsvRepairExecutor(),
         llm_port=_FakeProposalPort(VALID_PROPOSAL),
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
     store = _InMemoryAuditStore()
 

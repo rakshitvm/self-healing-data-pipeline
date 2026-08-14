@@ -63,6 +63,31 @@ class _ExplodingCsvRepairExecutor:
         raise AssertionError("executor.execute() should not have been called")
 
 
+class _AlwaysApproveCsvHumanApprovalPort:
+    """Fake `CsvHumanApprovalPort`: always approves.
+
+    Every non-healthy repair now requires explicit human approval before
+    apply — this stands in for a human saying "yes" so tests that assert
+    a successful end-to-end repair can still reach `apply`/`reverify`.
+    """
+
+    def request_approval(self, request: Any) -> bool:
+        return True
+
+
+class _RecordingCsvHumanApprovalPort:
+    """Fake `CsvHumanApprovalPort`: records every request; configurable
+    approve/reject decision."""
+
+    def __init__(self, approved: bool) -> None:
+        self._approved = approved
+        self.requests: list[Any] = []
+
+    def request_approval(self, request: Any) -> bool:
+        self.requests.append(request)
+        return self._approved
+
+
 def _write(tmp_path: Path, name: str, content: str) -> str:
     path = tmp_path / name
     path.write_text(content, encoding="utf-8")
@@ -106,6 +131,7 @@ def test_wrong_delimiter_flows_through_full_workflow(tmp_path: Path) -> None:
         detector=LocalCsvFailureDetector(),
         executor=PandasCsvRepairExecutor(),
         llm_port=_FakeProposalPort(VALID_PROPOSAL),
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
 
     result = graph.invoke(build_initial_state(file_path))
@@ -127,6 +153,7 @@ def test_wrong_encoding_flows_through_workflow(tmp_path: Path) -> None:
         llm_port=_FakeProposalPort(
             {"delimiter": ",", "encoding": "latin-1", "header_row": 0, "engine": "python"}
         ),
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
 
     result = graph.invoke(build_initial_state(str(path)))
@@ -159,7 +186,10 @@ def test_single_column_malformation_flows_through_workflow(tmp_path: Path) -> No
     )
     executor = _FakeCsvRepairExecutor(CsvExecutionOutcome(success=True, confidence=1.0))
     graph = build_csv_repair_workflow(
-        detector=LocalCsvFailureDetector(), executor=executor, llm_port=_FakeProposalPort(VALID_PROPOSAL)
+        detector=LocalCsvFailureDetector(),
+        executor=executor,
+        llm_port=_FakeProposalPort(VALID_PROPOSAL),
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
 
     result = graph.invoke(build_initial_state(file_path))
@@ -184,6 +214,7 @@ def test_header_detection_flows_through_full_workflow(tmp_path: Path) -> None:
         llm_port=_FakeProposalPort(
             {"delimiter": ",", "encoding": "utf-8", "header_row": 1, "engine": "python"}
         ),
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
 
     result = graph.invoke(build_initial_state(file_path))
@@ -214,6 +245,7 @@ def test_engine_selection_flows_through_full_workflow(tmp_path: Path) -> None:
         llm_port=_FakeProposalPort(
             {"delimiter": ",", "encoding": "utf-8", "header_row": 0, "engine": "python"}
         ),
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
 
     result = graph.invoke(build_initial_state(file_path))
@@ -230,7 +262,10 @@ def test_valid_csv_repair_params_reaches_apply(tmp_path: Path) -> None:
     file_path = _write(tmp_path, "wrong_delimiter.csv", WRONG_DELIMITER_CSV)
     executor = _FakeCsvRepairExecutor(CsvExecutionOutcome(success=True, confidence=1.0))
     graph = build_csv_repair_workflow(
-        detector=LocalCsvFailureDetector(), executor=executor, llm_port=_FakeProposalPort(VALID_PROPOSAL)
+        detector=LocalCsvFailureDetector(),
+        executor=executor,
+        llm_port=_FakeProposalPort(VALID_PROPOSAL),
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
 
     graph.invoke(build_initial_state(file_path))
@@ -263,7 +298,12 @@ def test_verification_failure_retries_when_budget_remains(tmp_path: Path) -> Non
         CsvExecutionOutcome(success=False, validation_errors=["still broken"])
     )
     llm_port = _FakeProposalPort(VALID_PROPOSAL)
-    graph = build_csv_repair_workflow(detector=LocalCsvFailureDetector(), executor=executor, llm_port=llm_port)
+    graph = build_csv_repair_workflow(
+        detector=LocalCsvFailureDetector(),
+        executor=executor,
+        llm_port=llm_port,
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
+    )
 
     result = graph.invoke(build_initial_state(file_path, max_retries=2))
 
@@ -278,7 +318,10 @@ def test_verification_failure_becomes_terminal_failure_when_budget_exhausted(tmp
         CsvExecutionOutcome(success=False, validation_errors=["still broken"])
     )
     graph = build_csv_repair_workflow(
-        detector=LocalCsvFailureDetector(), executor=executor, llm_port=_FakeProposalPort(VALID_PROPOSAL)
+        detector=LocalCsvFailureDetector(),
+        executor=executor,
+        llm_port=_FakeProposalPort(VALID_PROPOSAL),
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
 
     result = graph.invoke(build_initial_state(file_path, max_retries=0))
@@ -286,6 +329,102 @@ def test_verification_failure_becomes_terminal_failure_when_budget_exhausted(tmp
     assert result["retry_count"] == 0
     assert result["status"] == RepairEpisodeStatus.FAILED
     assert result["error_message"] == "verification did not succeed"
+
+
+# --- Human approval now gates every non-healthy repair, single-failure --
+# --- included, not only multi-failure episodes. -------------------------
+
+
+def test_single_failure_repair_calls_human_approval(tmp_path: Path) -> None:
+    """A single-failure repair must now invoke the approval port — this
+    was NOT true before this behavioral correction (single-failure used
+    to auto-apply)."""
+    file_path = _write(tmp_path, "wrong_delimiter.csv", WRONG_DELIMITER_CSV)
+    approval_port = _RecordingCsvHumanApprovalPort(approved=True)
+    graph = build_csv_repair_workflow(
+        detector=LocalCsvFailureDetector(),
+        executor=PandasCsvRepairExecutor(),
+        llm_port=_FakeProposalPort(VALID_PROPOSAL),
+        approval_port=approval_port,
+    )
+
+    graph.invoke(build_initial_state(file_path))
+
+    assert len(approval_port.requests) == 1
+    request = approval_port.requests[0]
+    assert request.file_path == file_path
+    assert request.failure_classes == frozenset({FailureClass.WRONG_DELIMITER})
+    assert request.prescription.delimiter == ";"
+
+
+def test_single_failure_approval_yes_reaches_apply_and_succeeds(tmp_path: Path) -> None:
+    file_path = _write(tmp_path, "wrong_delimiter.csv", WRONG_DELIMITER_CSV)
+    graph = build_csv_repair_workflow(
+        detector=LocalCsvFailureDetector(),
+        executor=PandasCsvRepairExecutor(),
+        llm_port=_FakeProposalPort(VALID_PROPOSAL),
+        approval_port=_RecordingCsvHumanApprovalPort(approved=True),
+    )
+
+    result = graph.invoke(build_initial_state(file_path))
+
+    assert result["human_approved"] is True
+    assert result["status"] == RepairEpisodeStatus.SUCCEEDED
+    assert result["repair_result"] is not None
+    assert result["repair_result"].success is True
+    assert result["verification_result"] is not None
+    assert result["verification_result"].success is True
+
+
+def test_single_failure_approval_no_does_not_apply(tmp_path: Path) -> None:
+    file_path = _write(tmp_path, "wrong_delimiter.csv", WRONG_DELIMITER_CSV)
+    executor = _ExplodingCsvRepairExecutor()
+    graph = build_csv_repair_workflow(
+        detector=LocalCsvFailureDetector(),
+        executor=executor,
+        llm_port=_FakeProposalPort(VALID_PROPOSAL),
+        approval_port=_RecordingCsvHumanApprovalPort(approved=False),
+    )
+
+    result = graph.invoke(build_initial_state(file_path))
+
+    assert result["human_approved"] is False
+    assert result["status"] == RepairEpisodeStatus.REJECTED
+    assert result["repair_result"] is None  # apply never ran
+    assert result["verification_result"] is None
+
+
+def test_single_failure_rejection_leaves_file_unchanged(tmp_path: Path) -> None:
+    file_path = _write(tmp_path, "wrong_delimiter.csv", WRONG_DELIMITER_CSV)
+    graph = build_csv_repair_workflow(
+        detector=LocalCsvFailureDetector(),
+        executor=PandasCsvRepairExecutor(),
+        llm_port=_FakeProposalPort(VALID_PROPOSAL),
+        approval_port=_RecordingCsvHumanApprovalPort(approved=False),
+    )
+
+    graph.invoke(build_initial_state(file_path))
+
+    assert Path(file_path).read_text(encoding="utf-8") == WRONG_DELIMITER_CSV
+
+
+def test_single_failure_without_approval_port_fails_safe_not_auto_apply(tmp_path: Path) -> None:
+    """Regression guard: a future change must not be able to accidentally
+    restore auto-apply for single-failure repairs by, e.g., special-casing
+    `approval_port is None`. Omitting the port must still fail safe
+    (rejected), exactly like the existing multi-failure fail-safe."""
+    file_path = _write(tmp_path, "wrong_delimiter.csv", WRONG_DELIMITER_CSV)
+    graph = build_csv_repair_workflow(
+        detector=LocalCsvFailureDetector(),
+        executor=_ExplodingCsvRepairExecutor(),
+        llm_port=_FakeProposalPort(VALID_PROPOSAL),
+    )
+
+    result = graph.invoke(build_initial_state(file_path))
+
+    assert result["human_approved"] is False
+    assert result["status"] == RepairEpisodeStatus.REJECTED
+    assert result["repair_result"] is None
 
 
 def test_tool_node_is_present_in_compiled_graph() -> None:

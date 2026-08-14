@@ -52,6 +52,14 @@ class _InMemoryAuditStore:
         pass
 
 
+class _AlwaysApproveCsvHumanApprovalPort:
+    """Fake `CsvHumanApprovalPort`: always approves — every non-healthy
+    repair now requires explicit human approval before apply."""
+
+    def request_approval(self, request: Any) -> bool:
+        return True
+
+
 class _FakeTracer:
     def __init__(self) -> None:
         self.invocations = 0
@@ -79,6 +87,7 @@ def test_trace_tracer_is_invoked_when_provided(tmp_path: Path) -> None:
         detector=LocalCsvFailureDetector(),
         executor=PandasCsvRepairExecutor(),
         llm_port=_FakeProposalPort(VALID_PROPOSAL),
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
     audit_store = _InMemoryAuditStore()
     tracer = _FakeTracer()
@@ -98,6 +107,7 @@ def test_agent_works_without_a_trace_tracer(tmp_path: Path) -> None:
         detector=LocalCsvFailureDetector(),
         executor=PandasCsvRepairExecutor(),
         llm_port=_FakeProposalPort(VALID_PROPOSAL),
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
     audit_store = _InMemoryAuditStore()
     agent = LangGraphCsvRepairAgent(graph, audit_store=audit_store)

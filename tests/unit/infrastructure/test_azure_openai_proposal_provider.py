@@ -7,6 +7,7 @@ required or read.
 
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 from self_healing_pipeline.application.orchestration.csv_repair_workflow import (
@@ -44,6 +45,14 @@ def _write(tmp_path: Path, name: str, content: str) -> str:
     path = tmp_path / name
     path.write_text(content, encoding="utf-8")
     return str(path)
+
+
+class _AlwaysApproveCsvHumanApprovalPort:
+    """Fake `CsvHumanApprovalPort`: always approves — every non-healthy
+    repair now requires explicit human approval before apply."""
+
+    def request_approval(self, request: Any) -> bool:
+        return True
 
 
 def test_azure_provider_satisfies_csv_repair_proposal_port() -> None:
@@ -140,7 +149,10 @@ def test_csv_repair_params_validation_still_happens_before_apply_valid(tmp_path:
     client = _mock_client_returning(json.dumps(VALID_PROPOSAL))
     provider = AzureOpenAIProposalProvider(client=client, deployment="gpt-4o-mini")
     graph = build_csv_repair_workflow(
-        detector=LocalCsvFailureDetector(), executor=PandasCsvRepairExecutor(), llm_port=provider
+        detector=LocalCsvFailureDetector(),
+        executor=PandasCsvRepairExecutor(),
+        llm_port=provider,
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
 
     result = graph.invoke(build_initial_state(file_path))
@@ -200,6 +212,7 @@ def test_non_azure_fake_provider_can_still_be_injected_into_the_workflow(tmp_pat
         detector=LocalCsvFailureDetector(),
         executor=PandasCsvRepairExecutor(),
         llm_port=_TrivialFakeProvider(),
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
 
     result = graph.invoke(build_initial_state(file_path))
