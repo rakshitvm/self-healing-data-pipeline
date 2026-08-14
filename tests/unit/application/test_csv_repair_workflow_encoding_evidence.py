@@ -111,6 +111,11 @@ def _expected_encoding(file_path: str) -> str:
 
 def test_wrong_encoding_sample_includes_chardet_evidence(tmp_path: Path) -> None:
     file_path = _write_latin1(tmp_path)
+    # Captured before `graph.invoke` — a successful `apply` would
+    # physically rewrite the file into canonical UTF-8, which would make
+    # a post-invoke chardet read report the *repaired* file's encoding
+    # instead of the original one this test is about.
+    expected_encoding = _expected_encoding(file_path)
     spy = _SpyProposalPort(VALID_PROPOSAL)
     graph = _graph(PandasCsvRepairExecutor(), spy)
 
@@ -119,7 +124,7 @@ def test_wrong_encoding_sample_includes_chardet_evidence(tmp_path: Path) -> None
     assert len(spy.samples) == 1
     sample = spy.samples[0]
     assert _EVIDENCE_MARKER in sample
-    assert _expected_encoding(file_path) in sample
+    assert expected_encoding in sample
 
 
 def test_wrong_delimiter_sample_is_unchanged(tmp_path: Path) -> None:
@@ -144,6 +149,11 @@ def test_wrong_encoding_proposal_is_corrected_to_the_detected_encoding(tmp_path:
     proposal entering `validate` must nonetheless carry the detected
     encoding, not the LLM's wrong guess."""
     file_path = _write_latin1(tmp_path)
+    # Captured before `graph.invoke` — this repair succeeds and
+    # physically rewrites the file into canonical UTF-8, so a post-invoke
+    # chardet read would report the *repaired* file's encoding instead of
+    # the original one this assertion is about.
+    expected_encoding = _expected_encoding(file_path)
     wrong_llm_guess = {"delimiter": ",", "encoding": "utf-8", "header_row": 0, "engine": "python"}
     spy = _SpyProposalPort(wrong_llm_guess)
     graph = _graph(PandasCsvRepairExecutor(), spy)
@@ -151,7 +161,7 @@ def test_wrong_encoding_proposal_is_corrected_to_the_detected_encoding(tmp_path:
     result = graph.invoke(build_initial_state(file_path, max_retries=0))
 
     assert result["proposed_params"] is not None
-    assert result["proposed_params"]["encoding"] == _expected_encoding(file_path)
+    assert result["proposed_params"]["encoding"] == expected_encoding
     assert result["proposed_params"]["encoding"] != "utf-8"
     # every other field is untouched, still exactly what the LLM proposed
     assert result["proposed_params"]["delimiter"] == ","
@@ -161,13 +171,16 @@ def test_wrong_encoding_proposal_is_corrected_to_the_detected_encoding(tmp_path:
 
 def test_correction_still_passes_through_existing_validation(tmp_path: Path) -> None:
     file_path = _write_latin1(tmp_path)
+    # Captured before `graph.invoke` — see the comment in
+    # `test_wrong_encoding_proposal_is_corrected_to_the_detected_encoding`.
+    expected_encoding = _expected_encoding(file_path)
     wrong_llm_guess = {"delimiter": ",", "encoding": "utf-8", "header_row": 0, "engine": "python"}
     graph = _graph(PandasCsvRepairExecutor(), _SpyProposalPort(wrong_llm_guess))
 
     result = graph.invoke(build_initial_state(file_path))
 
     assert result["validated_params"] is not None
-    assert result["validated_params"].encoding == _expected_encoding(file_path)
+    assert result["validated_params"].encoding == expected_encoding
     assert result["validation_errors"] == []
 
 

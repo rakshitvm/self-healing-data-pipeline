@@ -36,12 +36,18 @@ class _FakeCsvRepairExecutor:
         self.calls.append((file_path, params))
         return self._outcome
 
+    def verify(self, file_path: str, params: CsvRepairParams) -> CsvExecutionOutcome:
+        return self._outcome
+
 
 class _ExplodingExecutor:
     """Fake `CsvRepairExecutor` that fails the test if ever called."""
 
     def execute(self, file_path: str, params: CsvRepairParams) -> CsvExecutionOutcome:
         raise AssertionError("executor.execute() should not have been called")
+
+    def verify(self, file_path: str, params: CsvRepairParams) -> CsvExecutionOutcome:
+        raise AssertionError("executor.verify() should not have been called")
 
 
 def test_successful_delimiter_repair() -> None:

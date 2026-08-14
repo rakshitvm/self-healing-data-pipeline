@@ -2,10 +2,10 @@
 
 Defines the boundary between a CSV repair agent's decision logic (which
 `CsvRepairParams` prescription to try) and the mechanics of actually
-attempting to read a CSV file with that prescription. Agents depend only
-on `CsvRepairExecutor`; a concrete implementation backed by pandas,
-Spark, Databricks, or any other engine can be substituted later without
-the agent, this abstraction, or any domain model changing (Open/Closed,
+repairing a CSV file with that prescription. Agents depend only on
+`CsvRepairExecutor`; a concrete implementation backed by pandas, Spark,
+Databricks, or any other engine can be substituted later without the
+agent, this abstraction, or any domain model changing (Open/Closed,
 Dependency Inversion).
 """
 
@@ -17,7 +17,8 @@ from self_healing_pipeline.domain.value_objects.csv_repair_params import CsvRepa
 
 
 class CsvExecutionOutcome(BaseModel):
-    """Result of attempting to read a CSV file with a given prescription."""
+    """Result of attempting to apply or verify a repair prescription
+    against a CSV file."""
 
     model_config = ConfigDict(frozen=True, extra="forbid", str_strip_whitespace=True)
 
@@ -29,12 +30,25 @@ class CsvExecutionOutcome(BaseModel):
 
 @runtime_checkable
 class CsvRepairExecutor(Protocol):
-    """Attempts to read a CSV file using a candidate prescription.
+    """Applies a candidate prescription to a CSV file and independently
+    verifies the result.
 
-    Implementations perform the actual CSV manipulation; this protocol is
-    the only thing a CSV repair agent depends on to do so.
+    `execute` and `verify` are deliberately separate, mirroring Tier 2's
+    `SchemaExecutor`: `execute` *mutates* `file_path` — it only ever
+    reports success after physically rewriting the file into canonical
+    form — while `verify` never writes anything; it independently
+    re-inspects the (now-rewritten) file to confirm the repair actually
+    holds. Implementations perform the actual CSV manipulation; this
+    protocol is the only thing a CSV repair agent depends on to do so.
     """
 
     def execute(self, file_path: str, params: CsvRepairParams) -> CsvExecutionOutcome:
-        """Attempt to read `file_path` using `params`; report the outcome."""
+        """Apply `params` to `file_path`, physically rewriting it into
+        canonical CSV form. Only reports `success=True` once that
+        rewrite has actually happened — never on a successful read alone."""
+        ...
+
+    def verify(self, file_path: str, params: CsvRepairParams) -> CsvExecutionOutcome:
+        """Independently confirm `file_path` now holds a valid, sane CSV.
+        Read-only: must never write to `file_path`."""
         ...

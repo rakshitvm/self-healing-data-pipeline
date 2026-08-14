@@ -121,6 +121,9 @@ class _RaisingExecutor:
     def execute(self, file_path: str, params: CsvRepairParams) -> CsvExecutionOutcome:
         raise RuntimeError("simulated executor crash for exception-span testing")
 
+    def verify(self, file_path: str, params: CsvRepairParams) -> CsvExecutionOutcome:
+        raise AssertionError("executor.verify() should not have been called")
+
 
 class _InMemoryAuditStore:
     def __init__(self) -> None:

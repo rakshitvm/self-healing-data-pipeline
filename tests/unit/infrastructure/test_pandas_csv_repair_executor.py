@@ -159,3 +159,100 @@ def test_repair_result_reports_readable_columns_and_data(tmp_path: Path) -> None
     assert result.message is not None
     assert "2 rows" in result.message
     assert "3 columns" in result.message
+
+
+# --- `execute` physically mutates; `verify` is strictly read-only -------
+
+
+def test_execute_physically_rewrites_the_file_to_canonical_form(tmp_path: Path) -> None:
+    """The live-demo bug: `execute` (apply) must genuinely rewrite the
+    file on disk into canonical CSV, not merely re-parse it in memory."""
+    file_path = _write(tmp_path, "wrong_delimiter.csv", "id;name;value\n1;alpha;10\n2;beta;20\n")
+    params = CsvRepairParams(delimiter=";", encoding="utf-8", header_row=0, engine=CsvEngine.PYTHON)
+
+    outcome = PandasCsvRepairExecutor().execute(file_path, params)
+
+    assert outcome.success is True
+    on_disk = Path(file_path).read_text(encoding="utf-8")
+    assert ";" not in on_disk
+    assert on_disk == "id,name,value\n1,alpha,10\n2,beta,20\n"
+
+
+def test_execute_does_not_write_when_the_prescription_fails_to_resolve_the_file(
+    tmp_path: Path,
+) -> None:
+    """No fabricated success: if the corrected prescription still doesn't
+    produce a sane multi-column result, `execute` must report failure
+    and must not touch the original file at all."""
+    file_path = _write(tmp_path, "still_broken.csv", "id name value\n1 alpha 10\n")
+    original_bytes = Path(file_path).read_bytes()
+    params = CsvRepairParams(delimiter=",", encoding="utf-8", header_row=0, engine=CsvEngine.PYTHON)
+
+    outcome = PandasCsvRepairExecutor().execute(file_path, params)
+
+    assert outcome.success is False
+    assert Path(file_path).read_bytes() == original_bytes
+
+
+def test_a_failed_write_never_corrupts_the_original_file(tmp_path: Path) -> None:
+    """Atomic write safety: if the write step itself fails after a
+    successful read, the original file must remain exactly as it was —
+    proven by making `DataFrame.to_csv` raise mid-repair."""
+    file_path = _write(tmp_path, "wrong_delimiter.csv", "id;name;value\n1;alpha;10\n2;beta;20\n")
+    original_bytes = Path(file_path).read_bytes()
+    params = CsvRepairParams(delimiter=";", encoding="utf-8", header_row=0, engine=CsvEngine.PYTHON)
+
+    with patch("pandas.DataFrame.to_csv", side_effect=OSError("simulated disk failure")):
+        outcome = PandasCsvRepairExecutor().execute(file_path, params)
+
+    assert outcome.success is False
+    assert Path(file_path).read_bytes() == original_bytes
+
+
+def test_verify_never_writes_to_the_file(tmp_path: Path) -> None:
+    """`verify` (reverify) must be strictly read-only — unlike `execute`,
+    it must never rewrite the file, even on a successful check."""
+    file_path = _write(tmp_path, "clean.csv", "id,name,value\n1,alpha,10\n2,beta,20\n")
+    params = CsvRepairParams(delimiter=",", encoding="utf-8", header_row=0, engine=CsvEngine.PYTHON)
+    before_bytes = Path(file_path).read_bytes()
+    before_mtime_ns = Path(file_path).stat().st_mtime_ns
+
+    outcome = PandasCsvRepairExecutor().verify(file_path, params)
+
+    assert outcome.success is True
+    assert Path(file_path).read_bytes() == before_bytes
+    assert Path(file_path).stat().st_mtime_ns == before_mtime_ns
+
+
+def test_verify_reports_failure_for_a_still_malformed_file(tmp_path: Path) -> None:
+    """`verify` independently re-reads with plain defaults (the file is
+    expected to already be canonical after `execute`) — if it still isn't
+    a sane multi-column CSV, verification must fail, read-only."""
+    file_path = _write(tmp_path, "still_semicolons.csv", "id;name;value\n1;alpha;10\n")
+    params = CsvRepairParams(delimiter=";", encoding="utf-8", header_row=0, engine=CsvEngine.PYTHON)
+    before_bytes = Path(file_path).read_bytes()
+
+    outcome = PandasCsvRepairExecutor().verify(file_path, params)
+
+    assert outcome.success is False
+    assert Path(file_path).read_bytes() == before_bytes  # still read-only even on failure
+
+
+def test_execute_then_verify_round_trip_on_real_malformed_data(tmp_path: Path) -> None:
+    """End-to-end proof at the executor level: apply physically repairs
+    the file, and a subsequent read-only verify independently confirms
+    it, exactly mirroring the workflow's apply -> reverify sequence."""
+    file_path = _write(
+        tmp_path, "wrong_delimiter.csv", "id;name;value\n1;alpha;10\n2;beta;20\n3;gamma;30\n"
+    )
+    params = CsvRepairParams(delimiter=";", encoding="utf-8", header_row=0, engine=CsvEngine.PYTHON)
+    executor = PandasCsvRepairExecutor()
+
+    apply_outcome = executor.execute(file_path, params)
+    assert apply_outcome.success is True
+
+    after_apply_bytes = Path(file_path).read_bytes()
+    verify_outcome = executor.verify(file_path, params)
+
+    assert verify_outcome.success is True
+    assert Path(file_path).read_bytes() == after_apply_bytes  # verify did not touch the file

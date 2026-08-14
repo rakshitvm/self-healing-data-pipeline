@@ -51,10 +51,13 @@ Node responsibilities:
   and `apply` is never called. Omitting `approval_port` (the default) —
   as a fail-safe — is treated as an automatic rejection whenever this
   node is reached, so approval can never be silently bypassed.
-- `apply`: delegates to `CsvRepairExecutor` with the validated
-  prescription — no pandas logic is duplicated here.
-- `reverify`: an independent, deterministic post-apply check, again via
-  `CsvRepairExecutor`. No LLM call.
+- `apply`: delegates to `CsvRepairExecutor.execute` with the validated
+  prescription — no pandas logic is duplicated here. `execute` physically
+  rewrites the file into canonical form; `RepairResult.applied` is only
+  ever `True` once that rewrite has actually happened, never merely
+  because the corrected prescription parsed in memory.
+- `reverify`: an independent, read-only post-apply check, via
+  `CsvRepairExecutor.verify` — it never writes to the file. No LLM call.
 
 Retries are bounded by `max_retries` (checked before every retry) and are
 driven by two conditional edges (after `validate` and after `reverify`),
@@ -408,7 +411,7 @@ def _make_reverify_node(executor: CsvRepairExecutor) -> Any:
 
         params = state["validated_params"]
         assert params is not None  # guaranteed by _route_after_validation
-        outcome = executor.execute(state["file_path"], params)
+        outcome = executor.verify(state["file_path"], params)
 
         logger.info(
             "node_completed",

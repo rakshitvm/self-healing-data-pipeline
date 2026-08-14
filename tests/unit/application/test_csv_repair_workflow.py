@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import chardet
+import pandas as pd
 
 from self_healing_pipeline.application.orchestration.csv_repair_workflow import (
     SAMPLE_TOOL_NODE_NAME,
@@ -45,14 +46,20 @@ class _FakeProposalPort:
 
 
 class _FakeCsvRepairExecutor:
-    """Fake `CsvRepairExecutor`: returns a canned outcome, records calls."""
+    """Fake `CsvRepairExecutor`: returns a canned outcome for both `execute`
+    (apply) and `verify` (reverify); records each separately."""
 
     def __init__(self, outcome: CsvExecutionOutcome) -> None:
         self._outcome = outcome
-        self.calls: list[tuple[str, CsvRepairParams]] = []
+        self.execute_calls: list[tuple[str, CsvRepairParams]] = []
+        self.verify_calls: list[tuple[str, CsvRepairParams]] = []
 
     def execute(self, file_path: str, params: CsvRepairParams) -> CsvExecutionOutcome:
-        self.calls.append((file_path, params))
+        self.execute_calls.append((file_path, params))
+        return self._outcome
+
+    def verify(self, file_path: str, params: CsvRepairParams) -> CsvExecutionOutcome:
+        self.verify_calls.append((file_path, params))
         return self._outcome
 
 
@@ -61,6 +68,9 @@ class _ExplodingCsvRepairExecutor:
 
     def execute(self, file_path: str, params: CsvRepairParams) -> CsvExecutionOutcome:
         raise AssertionError("executor.execute() should not have been called")
+
+    def verify(self, file_path: str, params: CsvRepairParams) -> CsvExecutionOutcome:
+        raise AssertionError("executor.verify() should not have been called")
 
 
 class _AlwaysApproveCsvHumanApprovalPort:
@@ -146,7 +156,13 @@ def test_wrong_delimiter_flows_through_full_workflow(tmp_path: Path) -> None:
 
 def test_wrong_encoding_flows_through_workflow(tmp_path: Path) -> None:
     path = tmp_path / "wrong_encoding.csv"
-    path.write_bytes("id,name,value\n1,café,10\n2,naïve,20\n3,façade,30\n".encode("latin-1"))
+    original_bytes = "id,name,value\n1,café,10\n2,naïve,20\n3,façade,30\n".encode("latin-1")
+    path.write_bytes(original_bytes)
+    # Captured from the file's *original* bytes, before `apply` physically
+    # rewrites it into canonical UTF-8 — chardet run after the repair
+    # would (correctly) detect the now-rewritten file's real encoding
+    # instead of the original one this test is about.
+    expected_encoding = chardet.detect(original_bytes)["encoding"]
     graph = build_csv_repair_workflow(
         detector=LocalCsvFailureDetector(),
         executor=PandasCsvRepairExecutor(),
@@ -163,10 +179,9 @@ def test_wrong_encoding_flows_through_workflow(tmp_path: Path) -> None:
     assert result["repair_result"] is not None
     assert result["repair_result"].prescription is not None
     # `propose` deterministically corrects `encoding` from the file's real
-    # bytes via chardet, overriding whatever the (fake) LLM proposed — so
-    # the applied encoding is chardet's answer, not the fake port's
-    # "latin-1", even though both decode this fixture identically.
-    expected_encoding = chardet.detect(path.read_bytes())["encoding"]
+    # (original) bytes via chardet, overriding whatever the (fake) LLM
+    # proposed — so the applied encoding is chardet's answer, not the fake
+    # port's "latin-1", even though both decode this fixture identically.
     assert result["repair_result"].prescription.encoding == expected_encoding
 
 
@@ -270,8 +285,9 @@ def test_valid_csv_repair_params_reaches_apply(tmp_path: Path) -> None:
 
     graph.invoke(build_initial_state(file_path))
 
-    assert len(executor.calls) == 2  # apply + reverify
-    _, params_passed_to_apply = executor.calls[0]
+    assert len(executor.execute_calls) == 1  # apply
+    assert len(executor.verify_calls) == 1  # reverify
+    _, params_passed_to_apply = executor.execute_calls[0]
     assert isinstance(params_passed_to_apply, CsvRepairParams)
     assert params_passed_to_apply.delimiter == ";"
 
@@ -425,6 +441,56 @@ def test_single_failure_without_approval_port_fails_safe_not_auto_apply(tmp_path
     assert result["human_approved"] is False
     assert result["status"] == RepairEpisodeStatus.REJECTED
     assert result["repair_result"] is None
+
+
+# --- Approved repairs must physically rewrite the file (live-demo bug) --
+
+
+def test_approved_single_failure_repair_physically_rewrites_the_file(tmp_path: Path) -> None:
+    """The exact bug found during the live demo: `apply` used to only
+    re-parse the file in memory with corrected params, never writing
+    anything back. An approved repair must now genuinely mutate the file
+    on disk into a valid canonical CSV, with the original data preserved."""
+    file_path = _write(tmp_path, "wrong_delimiter.csv", WRONG_DELIMITER_CSV)
+    graph = build_csv_repair_workflow(
+        detector=LocalCsvFailureDetector(),
+        executor=PandasCsvRepairExecutor(),
+        llm_port=_FakeProposalPort(VALID_PROPOSAL),
+        approval_port=_AlwaysApproveCsvHumanApprovalPort(),
+    )
+
+    result = graph.invoke(build_initial_state(file_path))
+
+    assert result["status"] == RepairEpisodeStatus.SUCCEEDED
+    assert result["repair_result"] is not None
+    assert result["repair_result"].applied is True
+
+    on_disk = Path(file_path).read_text(encoding="utf-8")
+    assert on_disk != WRONG_DELIMITER_CSV  # the physical file was rewritten, not just re-parsed
+    assert ";" not in on_disk  # the malformed delimiter is gone from disk
+
+    repaired = pd.read_csv(file_path)  # plain defaults: the file is now canonical
+    assert list(repaired.columns) == ["id", "name", "value"]
+    assert repaired.shape == (3, 3)
+    assert repaired.iloc[0].tolist() == [1, "alpha", 10]
+    assert repaired.iloc[1].tolist() == [2, "beta", 20]
+    assert repaired.iloc[2].tolist() == [3, "gamma", 30]
+
+
+def test_rejected_repair_leaves_file_byte_for_byte_unchanged(tmp_path: Path) -> None:
+    file_path = _write(tmp_path, "wrong_delimiter.csv", WRONG_DELIMITER_CSV)
+    original_bytes = Path(file_path).read_bytes()
+    graph = build_csv_repair_workflow(
+        detector=LocalCsvFailureDetector(),
+        executor=PandasCsvRepairExecutor(),
+        llm_port=_FakeProposalPort(VALID_PROPOSAL),
+        approval_port=_RecordingCsvHumanApprovalPort(approved=False),
+    )
+
+    result = graph.invoke(build_initial_state(file_path))
+
+    assert result["status"] == RepairEpisodeStatus.REJECTED
+    assert Path(file_path).read_bytes() == original_bytes
 
 
 def test_tool_node_is_present_in_compiled_graph() -> None:
