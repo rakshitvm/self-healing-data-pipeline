@@ -33,9 +33,10 @@ Both tiers are independent LangGraph `StateGraph` workflows:
 
 ```
 Tier 1: src/self_healing_pipeline/application/orchestration/csv_repair_workflow.py
-  sample -> diagnose -> propose -> validate -> [human_approval*] -> apply -> reverify
-  * only for a genuine multi-failure episode — a single-failure repair
-    auto-applies exactly as it always has (backward compatible)
+  sample -> diagnose -> propose -> validate -> human_approval -> apply -> reverify
+  human_approval is reached for every non-healthy repair (single- or
+  multi-failure) — a healthy file short-circuits before diagnose and
+  never reaches it
 
 Tier 2: src/self_healing_pipeline/application/orchestration/schema_repair_workflow.py
   detect -> diff -> resolve_renames (nested subgraph) -> propose -> validate
@@ -70,8 +71,9 @@ trace correctly shows its internal nodes nested under the parent.
   fields.
 - **Validation**: `CsvRepairParams` (Pydantic) — a proposal that doesn't
   validate never reaches apply; the workflow retries (bounded) or fails.
-- **Human approval**: only for multi-failure episodes (`human_approval`
-  node) — single-failure repairs auto-apply.
+- **Human approval**: required before apply for every non-healthy
+  repair, single-failure or multi-failure (`human_approval` node) —
+  nothing auto-applies.
 - **Apply/reverify**: `PandasCsvRepairExecutor` — same validated params
   applied via one `pd.read_csv(...)` call, then independently
   re-verified.
@@ -106,9 +108,26 @@ trace correctly shows its internal nodes nested under the parent.
 
 ## Human-in-the-loop approval
 
+**Invariant: any non-healthy repair that would modify data requires
+explicit human approval before apply.**
+
+```
+Healthy:
+  detect -> healthy -> exit
+
+Tier 1:
+  diagnose -> propose -> validate -> human_approval
+      approved -> apply -> reverify -> success
+      rejected -> set_rejected, no mutation
+
+Tier 2:
+  detect/diff -> propose/resolve -> validate/confidence -> human_approval
+      approved -> apply -> verify
+      rejected -> no mutation
+```
+
 The LLM may analyze, propose, and assign confidence — it may never
-authorize a data-changing repair. Tier 2 always requires approval;
-Tier 1 requires it specifically for multi-failure episodes. See
+authorize a data-changing repair. See
 `docs/architecture/adr/0003-human-in-the-loop-approval.md`.
 
 Example prompt:

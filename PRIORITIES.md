@@ -15,8 +15,9 @@
 - Observability — structured logs with `trace_id` propagation, MLflow
   tracing (LangGraph/tool/LLM spans), MLflow Run-level token/cost
   metrics.
-- Human approval for anything data-changing beyond the simplest
-  single-failure case (see P1 — extended to multi-failure Tier 1).
+- Human approval for anything data-changing, including the simplest
+  single-failure case (see P1 — extended further to also cover
+  multi-failure Tier 1).
 
 **Status: COMPLETE** (Azure OpenAI provider path implemented but
 verification PENDING real credentials — Groq fully verified end-to-end).

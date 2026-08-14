@@ -22,8 +22,7 @@ scope for this project phase).
 | Pydantic validation before apply | `CsvRepairParams` | Same as above | COMPLETE |
 | Repair + independent reverify | `apply`/`reverify` nodes, both via `CsvRepairExecutor` | `test_csv_repair_workflow.py` | COMPLETE |
 | Retry on invalid/failed repair (bounded) | `increment_retry`/`max_retries` | `test_verification_failure_retries_when_budget_remains` | COMPLETE |
-| Human approval for multi-failure repairs | `human_approval` node, `CsvHumanApprovalPort` | `test_csv_repair_workflow_multi_error.py` (approve/reject/no-port fail-safe); real CLI run | COMPLETE |
-| Single-failure repair stays unattended (backward compat) | `human_approval` only reached when `len(failure_classes) > 1` | `test_single_failure_never_invokes_approval_port` | COMPLETE |
+| Human approval for every non-healthy repair (single- or multi-failure) | `human_approval` node reached unconditionally for any non-healthy repair, `CsvHumanApprovalPort` | `test_csv_repair_workflow.py` (single-failure approve/reject/no-port fail-safe), `test_csv_repair_workflow_multi_error.py` (multi-failure approve/reject/no-port fail-safe); real CLI run | COMPLETE |
 | PostgreSQL audit | `repair_episodes`/`repair_events`, `PostgresRepairAuditStore` | `test_postgres_repair_audit_store.py`; real `psql` queries against live episodes | COMPLETE |
 | Structured logging | `infrastructure/logging/logger.py`, every node | Visible in every CLI run's stdout | COMPLETE |
 | `trace_id` propagation | `get_logger()` reads `mlflow.get_active_trace_id()` | Real CLI runs show identical `trace_id` across every log line | COMPLETE |
@@ -78,7 +77,7 @@ scope for this project phase).
 
 | Requirement | Evidence | Status |
 |---|---|---|
-| Full test suite passing | `pytest -q` → 222 passed (see `docs/FINAL_VERIFICATION.md`) | COMPLETE |
+| Full test suite passing | `pytest -q` → 227 passed | COMPLETE |
 | Lint clean | `ruff check src/ tests/`, `ruff check scripts/` | COMPLETE |
 | Type-check clean | `mypy --strict src/ tests/` | COMPLETE |
 | Diff hygiene | `git diff --check` | COMPLETE |

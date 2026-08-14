@@ -25,12 +25,16 @@ deterministic confidence score) claims to be.
   score and flags low-confidence proposals as `escalated` for extra
   visibility, but this only affects *logging*, not whether approval is
   requested — approval is requested either way.
-- **Tier 1**: a single-failure repair auto-applies exactly as it always
-  has (unchanged, low-risk, single well-understood parameter change).
-  A genuine **multi-failure** episode (more than one independent Tier 1
-  dimension repaired at once via one combined prescription) routes
-  through a new `human_approval` node before `apply`, mirroring Tier 2's
-  gate.
+- **Tier 1**: every non-healthy repair — a single-failure repair just as
+  much as a genuine **multi-failure** episode (more than one independent
+  Tier 1 dimension repaired at once via one combined prescription) —
+  routes through a `human_approval` node before `apply`, mirroring
+  Tier 2's gate. A healthy file short-circuits before diagnosis and
+  never reaches this node at all, so the "no approval for a healthy
+  file" guarantee is unaffected. (Earlier in this project, only
+  multi-failure episodes were gated and a single-failure repair
+  auto-applied; this was revised so that *any* repair that would modify
+  a file requires approval, not just multi-failure ones.)
 - Rejection is a first-class terminal outcome (`RepairEpisodeStatus.REJECTED`
   / `SchemaRepairStatus.REJECTED`): `apply` is never called, the
   file/data is provably unchanged (asserted directly in tests, not just
@@ -68,9 +72,10 @@ deterministic confidence score) claims to be.
 
 ## Consequences
 
-- Every multi-failure Tier 1 repair and every Tier 2 repair requires an
-  interactive step — there is currently no fully unattended path for
-  these cases (single-failure Tier 1 remains unattended, as before).
+- Every non-healthy Tier 1 repair (single- or multi-failure) and every
+  Tier 2 repair requires an interactive step — there is currently no
+  fully unattended path for any repair that would modify a file. Only a
+  healthy file (nothing to repair) remains fully unattended.
 - The audit/history trail is richer: a rejected proposal is fully
   recorded (diff, prescription, confidence), not discarded, which is
   valuable for understanding *why* something needed a human and what
