@@ -16,21 +16,14 @@ pydantic-settings==2.15.0
 python-dotenv==1.0.1
 
 # --- Persistence ---
-sqlalchemy==2.0.51
-alembic==1.19.0
 psycopg2-binary==2.9.12
 
 # --- Logging ---
 structlog==26.1.0
-loguru==0.7.3
 
 # --- Data handling ---
 pandas==2.3.3
 chardet==7.5.1
-python-multipart==0.0.32
-
-# --- Resilience (self-healing / retry semantics) ---
-tenacity==9.1.4
 
 # --- CLI interface ---
 click==8.4.2

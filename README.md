@@ -397,8 +397,7 @@ mypy --strict src/ tests/
 
 ## Project structure
 
-See [docs/architecture/overview.md](docs/architecture/overview.md) and
-`docs/architecture/adr/` for architecture decision records.
+See `docs/architecture/adr/` for architecture decision records.
 
 ## License
 
