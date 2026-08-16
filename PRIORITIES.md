@@ -19,8 +19,8 @@
   single-failure case (see P1 — extended further to also cover
   multi-failure Tier 1).
 
-**Status: COMPLETE** (Azure OpenAI provider path implemented but
-verification PENDING real credentials — Groq fully verified end-to-end).
+**Status: COMPLETE** (both Azure OpenAI and Groq provider paths are
+implemented and have been verified end-to-end against real credentials).
 
 ## P1 — Tier 2 schema repair + hardening
 
@@ -58,7 +58,6 @@ verification PENDING real credentials — Groq fully verified end-to-end).
 
 | Deferred item | Why |
 |---|---|
-| Azure OpenAI live verification | Credentials not available until tomorrow; code path exists and mirrors the already-verified Groq path (same SDK, same autolog behavior) |
 | Tier 2 multi-error detection | Out of scope for this phase — Tier 1 multi-error was the explicit requirement |
 | Genuine 3-way Tier 1 simultaneous failure (encoding+delimiter+structural) | Not achievable without changing the delimiter-detection algorithm itself (`csv.Sniffer` requires the same consistency a structural failure would violate) — would be a larger redesign than justified for this phase |
 | UI/API approval mechanism | CLI approval satisfies the human-in-the-loop requirement now; ports were deliberately kept framework-agnostic so this can be added later without touching the workflow |

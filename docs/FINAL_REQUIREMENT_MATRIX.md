@@ -1,9 +1,7 @@
 # Final Requirement Matrix
 
-Status values: **COMPLETE** (implemented and verified), **PENDING**
-(implemented but verification blocked on something external — here,
-always Azure OpenAI credentials), **NOT REQUIRED** (explicitly out of
-scope for this project phase).
+Status values: **COMPLETE** (implemented and verified), **NOT REQUIRED**
+(explicitly out of scope for this project phase).
 
 ## Tier 1 — CSV self-healing
 
@@ -60,7 +58,7 @@ scope for this project phase).
 |---|---|---|---|
 | Provider-agnostic ports | `CsvRepairProposalPort`, `RenameConfirmationPort` (domain `Protocol`s) | `domain/interfaces/services/*.py` | COMPLETE |
 | Groq provider (temporary dev) | `GroqProposalProvider`, `GroqRenameConfirmationProvider` | Multiple real end-to-end CLI runs, both tiers | COMPLETE |
-| Azure OpenAI provider (production) | `AzureOpenAIProposalProvider`, `AzureRenameConfirmationProvider` | Code exists, structurally mirrors Groq; **no real-credential run yet** | **PENDING** (credentials tomorrow) |
+| Azure OpenAI provider (production) | `AzureOpenAIProposalProvider`, `AzureRenameConfirmationProvider` | Verified end-to-end against a real Azure OpenAI deployment (real HTTP 200 response, real MLflow `CHAT_MODEL` span, real PostgreSQL audit record) | COMPLETE |
 | `.env`-driven provider selection | `LLMProviderSettings` via pydantic-settings (not raw `os.environ`) | `test_proposal_provider_factory.py` | COMPLETE |
 
 ## Documentation
@@ -77,7 +75,7 @@ scope for this project phase).
 
 | Requirement | Evidence | Status |
 |---|---|---|
-| Full test suite passing | `pytest -q` → 227 passed | COMPLETE |
+| Full test suite passing | `pytest -q` → 238 passed | COMPLETE |
 | Lint clean | `ruff check src/ tests/`, `ruff check scripts/` | COMPLETE |
 | Type-check clean | `mypy --strict src/ tests/` | COMPLETE |
 | Diff hygiene | `git diff --check` | COMPLETE |
@@ -86,11 +84,8 @@ scope for this project phase).
 ## Summary
 
 - **COMPLETE**: every Tier 1, Tier 2, multi-error, human-approval,
-  audit/history, and observability requirement, using the Groq provider
-  end-to-end.
-- **PENDING**: Azure OpenAI real-credential verification only — the code
-  path is implemented and structurally identical to the verified Groq
-  path, but has not been run for real.
+  audit/history, and observability requirement, using both the Groq and
+  Azure OpenAI providers end-to-end.
 - **NOT REQUIRED**: genuine 3-way simultaneous Tier 1 failure detection
   (architecturally blocked without a larger redesign) and Tier 2
   multi-error detection — both explicitly out of scope for this phase.
