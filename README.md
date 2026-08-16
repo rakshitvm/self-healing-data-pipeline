@@ -82,6 +82,7 @@ is documented as an explicit decision in
 | Capability | Status |
 |---|---|
 | Tier 1 — CSV self-healing | **Implemented** |
+| Tier 1 `single_column_malformation` repair | **PARTIALLY IMPLEMENTED** — single-character delimiters (including `" "`/`"\t"`) are repairable; variable-width whitespace is a confirmed **KNOWN LIMITATION** (fails safely, no regex-separator support — see §9, §25) |
 | Tier 2 — Schema-drift self-healing | **Implemented** (one drift episode per invocation; Tier 2 multi-error is not implemented) |
 | Tier 3 | **Not implemented** — no code exists in this repository |
 | Tier 4 | **Not implemented** — no code exists in this repository |
@@ -289,7 +290,8 @@ flowchart LR
 | `wrong_encoding` | `LocalCsvFailureDetector` + `chardet` | `chardet`-corrected `encoding` field (deterministically overrides the LLM's guess for this one field only) | Yes for the rest of the prescription; encoding itself is deterministic | Retry (bounded) → `set_failure` |
 | `header_detection` | `LocalCsvFailureDetector` (stdlib `csv.Sniffer`) | `header_row` correction | Yes | Retry (bounded) → `set_failure` |
 | `engine_selection` | `LocalCsvFailureDetector` | `engine` correction (`python`/`c`/`pyarrow`); only the *missing-field* ragged-row variant is repairable — the *extra-field* variant has no representable fix in `CsvRepairParams` | Yes | Retry (bounded) → `set_failure` |
-| `single_column_malformation` | `LocalCsvFailureDetector` | `delimiter` correction (e.g. colon-delimited data silently parsed as one column) | Yes | Retry (bounded) → `set_failure` |
+| `single_column_malformation` (consistent single-character separator, e.g. colon) | `LocalCsvFailureDetector` | `delimiter` correction — **IMPLEMENTED**, including whitespace delimiters (`" "`, `"\t"`) | Yes | Retry (bounded) → `set_failure` |
+| `single_column_malformation` (variable-width whitespace, e.g. columns visually aligned with a run of spaces) | `LocalCsvFailureDetector` (same detection as above — the detector does not distinguish the two) | **KNOWN LIMITATION — not repairable.** See the dedicated note below the table. | Yes (LLM still proposes a delimiter; it's a valid single character, but cannot fix this specific data shape) | Fails safely: `apply` reports failure, `reverify` never touches any file, retries exhaust, `set_failure` — source is never modified |
 | Multiple simultaneous Tier 1 failures | `detect_all()` → `frozenset[FailureClass]` | One combined prescription from one evidence-augmented LLM call | Yes | Same retry/fail path; always routed through `human_approval` |
 | Added column (schema drift) | `compute_column_diff` | `add_default` operation | Yes — LLM confirms/contributes to the operation set via `propose` | No retry loop — `invalid` state on validation failure |
 | Removed column (schema drift) | `compute_column_diff` | `drop` operation | Yes | Same |
@@ -297,6 +299,40 @@ flowchart LR
 | Renamed column (schema drift) | `compute_column_diff` hint + `resolve_renames` subgraph | `rename` operation, only if `llm_confirm` + fuzzy-score confidence resolves the hint | Yes (subgraph's `llm_confirm` node) | Unconfirmed hints are not applied; a low-confidence but confirmed rename is still gated by `human_approval` |
 | Genuine 3-way Tier 1 failure (encoding + delimiter + a structural class) | Not achievable | — | — | **Not supported** — `csv.Sniffer` cannot confidently report a delimiter under the same raggedness that would also trigger a structural failure; documented in `local_csv_failure_detector.py`'s module docstring |
 | Multiple simultaneous Tier 2 drift episodes | Not implemented | — | — | **Not supported this phase** |
+
+**`single_column_malformation` and variable-width whitespace — KNOWN LIMITATION, confirmed by live E2E validation with the real Azure OpenAI provider.**
+`single_column_malformation` detection itself is fully **IMPLEMENTED** —
+`LocalCsvFailureDetector` correctly flags any file where every row parses
+as one field. Repair is **IMPLEMENTED** for the general case: a
+single-character delimiter (any character, including whitespace — `" "`
+and `"\t"` are both valid and accepted by `CsvRepairParams`). However,
+`CsvRepairParams.delimiter` is, by design, a **single character**
+(`min_length=1, max_length=1` — this is intentional and is not being
+expanded; see §26). The canonical single-column-malformation fixture
+used throughout this project's tests —
+```
+id  name    value
+1   alpha   10
+2  beta     20
+3    gamma  30
+```
+— is separated by a **variable number of literal space characters** for
+visual alignment (confirmed byte-for-byte: it contains no tab
+characters at all), not a single consistent delimiter. No single
+character can express "collapse a variable run of whitespace into one
+delimiter" — that requires a regex separator (e.g. `sep=r"\s+"`), which
+is **NOT currently supported** and is **not being added** (see §26 —
+doing so would mean widening `CsvRepairParams` beyond its intentional
+single-character model, an architectural change out of scope here).
+Confirmed live: Azure OpenAI correctly proposes `delimiter: "\t"` for
+this fixture (a reasonable, valid single-character guess), the proposal
+passes validation, but `apply` still reports failure
+(`"...the result still has a single column..."`) because there are no
+literal tab bytes in the file to split on. **This fails safely** — no
+output is ever created, `reverify` never touches any file, and the
+source is left byte-for-byte unchanged (verified via SHA-256 before/
+after in live testing) — rather than silently producing an incorrect
+repair.
 
 ## 10. LLM Architecture
 
@@ -658,14 +694,14 @@ mypy --strict src/ tests/
 ```
 
 Current verified result on this repository, this session:
-**238 passed.**
+**245 passed.**
 
 - **Unit tests** (`tests/unit/`): one file per behavior area across
   `application/` (both workflows, error router, rename subgraph, schema
-  diff), `domain/` (schema repair operations), and `infrastructure/`
-  (both LLM providers, both executors, MLflow tracker/tracer, Postgres
-  audit store, tracing setup, token/cost aggregation) and `interfaces/`
-  (CLI).
+  diff), `domain/` (schema repair operations, `CsvRepairParams`), and
+  `infrastructure/` (both LLM providers, both executors, MLflow
+  tracker/tracer, Postgres audit store, tracing setup, token/cost
+  aggregation) and `interfaces/` (CLI).
 - **Integration tests** (`tests/integration/test_mlflow_tracing_smoke.py`):
   real MLflow server required — auto-**skips** (not fails) if
   unreachable at `http://localhost:5000`.
@@ -818,6 +854,50 @@ these have a real measurement in this repository.
 - **No production security hardening** — see §23.
 - **No horizontal scaling / queueing** — one file/table per synchronous
   CLI invocation.
+- **KNOWN LIMITATION — variable-width-whitespace `single_column_malformation`
+  cannot be repaired.** `CsvRepairParams.delimiter` is intentionally a
+  single character (not a regex separator); a run of variable-width
+  spaces has no single-character representation. Confirmed via live E2E
+  with the real Azure OpenAI provider: the proposal, validation, and
+  approval steps all succeed, but `apply` correctly reports failure and
+  the source is left untouched — see §9 for the full analysis. Regular,
+  single-consistent-character `single_column_malformation` (including a
+  tab or space delimiter) **is** repairable.
+- **KNOWN LIMITATION — best-effort MLflow trace/artifact export can emit
+  a non-fatal permission warning.** Observed at least once during Tier 2
+  validation: `Failed to send trace to MLflow backend: [Errno 13]
+  Permission denied: '/mlartifacts'`. Root cause: this project's MLflow
+  Tracking Server is started with a bare local `--default-artifact-root
+  /mlartifacts` (`docker-compose.yml`), so each experiment's
+  `artifact_location` is recorded as that literal path — a path that
+  only exists inside the MLflow container's own volume, not on the host
+  where the CLI (and its MLflow client) actually runs. The client's
+  best-effort artifact-export attempt fails as a result; **the trace's
+  core metadata is still recorded successfully regardless** (confirmed:
+  `mlflow.get_trace(...)` still returns the full span tree after this
+  warning appears), matching this project's existing "MLflow is
+  best-effort, never blocks or invalidates a repair" design (§14). Not
+  fixed: `artifact_location` is fixed per-experiment at creation time,
+  so changing the Compose command would not retroactively fix the
+  experiment already in use throughout this project, and would need
+  careful, separate verification before touching a working tracking
+  server — out of scope for a stabilization pass under this project's
+  "do not introduce unnecessary risk" constraint.
+- **TEST-HARNESS ONLY — a piped single `y` cannot survive a retry's
+  second approval prompt.** Investigated directly: `click.confirm()`
+  raises `click.Abort` on stdin EOF — standard, correct Click behavior,
+  identical to what happens if a real interactive user pressed Ctrl+D or
+  Ctrl+C at *any* approval prompt (not specific to retries). A real user
+  at an interactive terminal never encounters stdin EOF between prompts.
+  Separately, and already documented in `audited_csv_repair.py`'s own
+  module docstring prior to this investigation: because the audit
+  episode is recorded *after* `graph.invoke()` returns (not per-node),
+  an aborted invocation — from Ctrl+C or Ctrl+D, at any prompt, retry or
+  not — produces no PostgreSQL episode row for that attempt. The source
+  file is never at risk either way (confirmed: byte-for-byte unchanged
+  after an aborted run). Recording partial/aborted attempts would
+  require per-node incremental audit writes or a new terminal status —
+  an architectural change intentionally not made here (see §26).
 
 ## 26. Roadmap
 
@@ -829,6 +909,21 @@ exists, not new architecture):
   separate output rather than mutating in place).
 - Add a bounded retry loop to Tier 2, mirroring Tier 1's.
 - Tier 2 multi-error support (multiple simultaneous drift episodes).
+- Point the MLflow server's `--default-artifact-root` at a proxied
+  `mlflow-artifacts://` URI (a Compose/infrastructure-only change) to
+  eliminate the best-effort artifact-permission warning documented in
+  §25 for any *newly created* experiment — noting this would not
+  retroactively affect the existing `tier1-csv-repair` experiment.
+- Per-node (rather than post-invocation) audit persistence, so an
+  interactively aborted CLI session still leaves a partial audit trail
+  — see §25's TEST-HARNESS ONLY finding.
+
+**Explicitly not on this roadmap** (considered during stabilization and
+deliberately not pursued): regex/multi-character separators for
+`single_column_malformation`'s variable-width-whitespace case (§9, §25)
+— this would mean widening `CsvRepairParams` beyond its intentional
+single-character delimiter model, which this project treats as a
+deliberate design boundary, not an oversight.
 
 **Future / optional** (deferred, not started, no code exists):
 - A UI/API-based approval channel — the approval ports are already

@@ -20,9 +20,19 @@ class CsvEngine(str, Enum):
 
 
 class CsvRepairParams(BaseModel):
-    """Immutable, LLM-derived parameters for repairing a CSV file."""
+    """Immutable, LLM-derived parameters for repairing a CSV file.
 
-    model_config = ConfigDict(frozen=True, extra="forbid", str_strip_whitespace=True)
+    Whitespace is deliberately *not* stripped at the model level: a valid
+    `delimiter` may itself be whitespace (e.g. `"\\t"` for tab-separated
+    data), and model-wide stripping would silently collapse that to an
+    empty string before `min_length=1` ever runs, rejecting an otherwise
+    correct proposal. `encoding` still has its own whitespace stripped
+    (via its field validator below), since a codec name is never
+    meaningfully whitespace itself and stray padding there is only ever
+    incidental LLM formatting noise.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     delimiter: str = Field(min_length=1, max_length=1)
     encoding: str
@@ -32,7 +42,9 @@ class CsvRepairParams(BaseModel):
     @field_validator("encoding")
     @classmethod
     def _validate_encoding(cls, value: str) -> str:
-        """Ensure the encoding name is a Python-recognized codec."""
+        """Strip incidental whitespace, then ensure the encoding name is a
+        Python-recognized codec."""
+        value = value.strip()
         try:
             codecs.lookup(value)
         except LookupError as exc:

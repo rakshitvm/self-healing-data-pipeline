@@ -75,7 +75,7 @@ Status values: **COMPLETE** (implemented and verified), **NOT REQUIRED**
 
 | Requirement | Evidence | Status |
 |---|---|---|
-| Full test suite passing | `pytest -q` → 238 passed | COMPLETE |
+| Full test suite passing | `pytest -q` → 245 passed | COMPLETE |
 | Lint clean | `ruff check src/ tests/`, `ruff check scripts/` | COMPLETE |
 | Type-check clean | `mypy --strict src/ tests/` | COMPLETE |
 | Diff hygiene | `git diff --check` | COMPLETE |
