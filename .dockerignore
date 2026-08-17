@@ -1,0 +1,59 @@
+# Build context for the application image (see Dockerfile). The
+# Dockerfile only ever COPYs requirements.txt and src/ explicitly, but
+# everything below is excluded from the build context too — smaller,
+# faster builds and defense-in-depth against secrets or dev-only
+# artifacts ever entering an image layer.
+
+# --- Version control ---
+.git/
+.gitignore
+
+# --- Secrets / environment (never bake these into an image) ---
+.env
+.env.*
+!.env.example
+
+# --- Python virtual environment / caches (never needed inside the image;
+# runtime dependencies are installed fresh from requirements.txt) ---
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- Tests and dev tooling (requirements-dev.txt is intentionally never
+# installed into this image either — see Dockerfile) ---
+tests/
+requirements-dev.txt
+
+# --- Runtime-generated / development-only application artifacts ---
+logs/
+configs/schema_migrations/
+
+# --- Documentation (not needed to run the application) ---
+docs/
+README.md
+PRIORITIES.md
+
+# --- Other services' infrastructure (external to this image — see
+# docker-compose.yml; this image only ever packages the application
+# itself, not PostgreSQL/MLflow/Elasticsearch/Kibana/Filebeat) ---
+docker/
+docker-compose.yml
+
+# --- Local scripts (host/dev-only: scripts/init_db.py, measure_nfr.py,
+# provision_kibana.py are run from the host against the Docker Compose
+# services, not from inside this image) ---
+scripts/
+
+# --- IDE / editor / assistant session state ---
+.vscode/
+.idea/
+*.swp
+.claude/

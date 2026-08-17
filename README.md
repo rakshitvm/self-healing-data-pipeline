@@ -684,6 +684,66 @@ Both are verified against `src/self_healing_pipeline/interfaces/cli/main.py`.
 prints `episode_id`, `table`, `status`, `confidence`, `human_approved`,
 `prescription`, and `message`.
 
+### Running via the application container (optional)
+
+The commands above run the CLI directly on the host — this project's
+primary, most-exercised path. A production-oriented `Dockerfile` (repo
+root) is also available, packaging the same `src/` application via
+`PYTHONPATH=/app/src` (this project's `pyproject.toml` has no
+`[project]`/`[build-system]` table, so there is no `pip install .` step
+here either — the image reproduces the exact host convention).
+**Deliberately not added as a `docker-compose.yml` service** —
+PostgreSQL/MLflow/Elasticsearch/Kibana/Filebeat there are
+infrastructure this application connects *to*, not services that should
+start alongside it by default; adding a sixth service wasn't needed to
+validate the image and risks changing the existing five's behavior for
+no benefit.
+
+```bash
+docker build -t self-healing-pipeline-app .
+
+# Top-level help — genuinely needs zero configuration, no secrets.
+docker run --rm self-healing-pipeline-app
+
+# A real repair, reachable over the same network docker-compose already
+# created (verified working: `docker network ls` → selfhealingdatapipeline_default;
+# the app container reaches `postgres`/`mlflow` by Compose service name,
+# exactly like the mlflow container already does internally — see
+# docker-compose.yml's own top comment for why).
+docker run --rm \
+  --network selfhealingdatapipeline_default \
+  -e LOG_LEVEL=INFO -e LOG_FORMAT=json \
+  -e LLM_PROVIDER=groq -e GROQ_API_KEY=<your-key> -e GROQ_MODEL=<your-model> \
+  -e DB_HOST=postgres -e DB_PORT=5432 \
+  -e MLFLOW_TRACKING_URI=http://mlflow:5000 \
+  -v /path/to/data:/data \
+  self-healing-pipeline-app repair /data/file.csv
+```
+No secrets or `.env` file are ever baked into the image (see
+`.dockerignore`) — every setting above is supplied at `docker run` time,
+exactly as the host CLI already reads them from the environment. Runs
+as a non-root user (`appuser`).
+
+If this were added to `docker-compose.yml`, the shape would be (not
+applied — reported per this task's scope):
+```yaml
+  app:
+    build: .
+    depends_on:
+      postgres: { condition: service_healthy }
+      mlflow: { condition: service_healthy }
+    environment:
+      DB_HOST: postgres
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      LLM_PROVIDER: ${LLM_PROVIDER}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    volumes:
+      - ./data:/data
+```
+invoked with `docker compose run app repair /data/file.csv` (`run`, not
+`up` — this is a one-shot CLI invocation, not a long-running service).
+
 ## 20. Testing
 
 ```bash
