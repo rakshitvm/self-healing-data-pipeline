@@ -51,7 +51,7 @@ class DatabricksSettings(BaseSettings):
     token: str = Field(validation_alias="DATABRICKS_TOKEN")
     job_id: int = Field(validation_alias="DATABRICKS_JOB_ID")
     notebook_param_name: str = Field(
-        default="repaired_csv_path", validation_alias="DATABRICKS_NOTEBOOK_PARAM_NAME"
+        default="input_path", validation_alias="DATABRICKS_NOTEBOOK_PARAM_NAME"
     )
 
 

@@ -15,6 +15,7 @@ import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -90,7 +91,11 @@ class TestAzureBlobSasUploader:
     def test_uploads_file_contents_with_sas_token_in_query_string(
         self, tmp_path: Path, fake_server: tuple[str, type[_RecordingHandler]]
     ) -> None:
+        """The actual PUT still goes to the plain (SAS-authenticated)
+        endpoint unchanged; only the *returned* `blob_url` is now a
+        `wasbs://` URI — see `TestWasbsCloudPath` for that in isolation."""
         base_url, handler = fake_server
+        netloc = urlsplit(base_url).netloc
         file_path = _write(tmp_path, "repaired.csv", "id,name\n1,alpha\n")
         uploader = AzureBlobSasUploader(
             container_url=f"{base_url}/mycontainer", sas_token="sv=2021&sig=fake-signature"
@@ -99,7 +104,7 @@ class TestAzureBlobSasUploader:
         outcome = uploader.upload(file_path)
 
         assert outcome.success is True
-        assert outcome.blob_url == f"{base_url}/mycontainer/repaired.csv"
+        assert outcome.blob_url == f"wasbs://mycontainer@{netloc}/repaired.csv"
         assert "sig=fake-signature" not in (outcome.blob_url or "")  # credential-free result
         assert len(handler.received) == 1
         request = handler.received[0]
@@ -154,6 +159,82 @@ class TestAzureBlobSasUploader:
 
         assert outcome.success is False
         assert outcome.error is not None
+
+
+class TestWasbsCloudPath:
+    """Pure tests of the HTTPS container URL -> `wasbs://` cloud-path
+    transform, isolated from the network — see Cell 4 of
+    `databricks_medallion_pipeline` for why Spark on Databricks needs this
+    scheme rather than a plain HTTPS URL."""
+
+    def test_converts_realistic_https_container_url_to_wasbs(self) -> None:
+        uploader = AzureBlobSasUploader(
+            container_url="https://myaccount.blob.core.windows.net/mycontainer",
+            sas_token="sv=2021-08-06&sig=fake-signature",
+        )
+
+        cloud_path = uploader._wasbs_url("repaired.csv")
+
+        assert cloud_path == "wasbs://mycontainer@myaccount.blob.core.windows.net/repaired.csv"
+        assert "sig=" not in cloud_path
+        assert "sv=" not in cloud_path
+
+    def test_handles_trailing_slash_on_container_url(self) -> None:
+        uploader = AzureBlobSasUploader(
+            container_url="https://myaccount.blob.core.windows.net/mycontainer/",
+            sas_token="sv=x",
+        )
+
+        cloud_path = uploader._wasbs_url("repaired.csv")
+
+        assert cloud_path == "wasbs://mycontainer@myaccount.blob.core.windows.net/repaired.csv"
+
+    def test_preserves_sovereign_cloud_storage_suffix(self) -> None:
+        """The authority is reused verbatim from `container_url` rather
+        than a hardcoded "blob.core.windows.net", so this also works for
+        e.g. Azure Government storage accounts."""
+        uploader = AzureBlobSasUploader(
+            container_url="https://myaccount.blob.core.usgovcloudapi.net/mycontainer",
+            sas_token="sv=x",
+        )
+
+        cloud_path = uploader._wasbs_url("repaired.csv")
+
+        assert cloud_path == "wasbs://mycontainer@myaccount.blob.core.usgovcloudapi.net/repaired.csv"
+
+
+class TestDatabricksSettingsNotebookParamNameDefault:
+    """The Databricks job's parameter is named `input_path` (per the
+    Databricks Job configuration) — the app must default to that name
+    while still allowing an explicit override."""
+
+    def test_default_notebook_param_name_is_input_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from self_healing_pipeline.infrastructure.config.cloud_settings import DatabricksSettings
+
+        monkeypatch.setenv("DATABRICKS_HOST", "https://example.databricks.com")
+        monkeypatch.setenv("DATABRICKS_TOKEN", "fake-token")
+        monkeypatch.setenv("DATABRICKS_JOB_ID", "1")
+        monkeypatch.delenv("DATABRICKS_NOTEBOOK_PARAM_NAME", raising=False)
+
+        settings = DatabricksSettings()  # type: ignore[call-arg]
+
+        assert settings.notebook_param_name == "input_path"
+
+    def test_notebook_param_name_env_override_still_works(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from self_healing_pipeline.infrastructure.config.cloud_settings import DatabricksSettings
+
+        monkeypatch.setenv("DATABRICKS_HOST", "https://example.databricks.com")
+        monkeypatch.setenv("DATABRICKS_TOKEN", "fake-token")
+        monkeypatch.setenv("DATABRICKS_JOB_ID", "1")
+        monkeypatch.setenv("DATABRICKS_NOTEBOOK_PARAM_NAME", "custom_param")
+
+        settings = DatabricksSettings()  # type: ignore[call-arg]
+
+        assert settings.notebook_param_name == "custom_param"
 
 
 class TestDatabricksJobTrigger:

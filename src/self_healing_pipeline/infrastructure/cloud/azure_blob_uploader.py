@@ -19,6 +19,7 @@ from __future__ import annotations
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict
 
@@ -68,6 +69,7 @@ class AzureBlobSasUploader:
         name = blob_name or source.name
         public_blob_url = f"{self._container_url}/{name}"
         request_url = f"{public_blob_url}?{self._sas_token}"
+        cloud_path = self._wasbs_url(name)
 
         request = urllib.request.Request(
             request_url,
@@ -83,7 +85,7 @@ class AzureBlobSasUploader:
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 if 200 <= response.status < 300:
-                    return UploadOutcome(success=True, blob_url=public_blob_url)
+                    return UploadOutcome(success=True, blob_url=cloud_path)
                 return UploadOutcome(
                     success=False, error=f"Unexpected status {response.status} from Azure Blob Storage"
                 )
@@ -92,3 +94,16 @@ class AzureBlobSasUploader:
             return UploadOutcome(success=False, error=f"HTTP {exc.code} from Azure Blob Storage: {body}")
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             return UploadOutcome(success=False, error=f"{type(exc).__name__}: {exc}")
+
+    def _wasbs_url(self, blob_name: str) -> str:
+        """Build a `wasbs://` URI Spark/Hadoop can resolve directly on
+        Databricks, reusing `container_url`'s own authority (account +
+        storage-suffix) verbatim rather than assuming the commercial-cloud
+        "blob.core.windows.net" suffix, so this also works against
+        sovereign-cloud storage accounts. Deliberately carries no SAS
+        token or other credential — reading this URI still requires
+        separately configured storage access on the Databricks/Spark side.
+        """
+        parsed = urlsplit(self._container_url)
+        container = parsed.path.strip("/")
+        return f"wasbs://{container}@{parsed.netloc}/{blob_name}"
