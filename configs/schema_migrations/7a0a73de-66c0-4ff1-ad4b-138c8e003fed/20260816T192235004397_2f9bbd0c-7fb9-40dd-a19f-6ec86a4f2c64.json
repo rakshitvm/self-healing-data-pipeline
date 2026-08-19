@@ -1,0 +1,79 @@
+{
+  "applied": true,
+  "baseline_version": 1,
+  "confidence": 0.638235294117647,
+  "created_at": "2026-08-16T19:22:35.004397Z",
+  "current_schema": [
+    {
+      "default": null,
+      "name": "id",
+      "nullable": false,
+      "type": "int64"
+    },
+    {
+      "default": null,
+      "name": "name",
+      "nullable": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "name": "age",
+      "nullable": false,
+      "type": "int64"
+    }
+  ],
+  "diff": {
+    "added": [
+      {
+        "default": null,
+        "name": "name",
+        "nullable": false,
+        "type": "string"
+      }
+    ],
+    "removed": [
+      {
+        "default": null,
+        "name": "customer_name",
+        "nullable": false,
+        "type": "string"
+      }
+    ],
+    "rename_hints": [
+      {
+        "added_column": "name",
+        "removed_column": "customer_name",
+        "similarity": 0.47058823529411764
+      }
+    ],
+    "type_changed": []
+  },
+  "entry_id": "2f9bbd0c-7fb9-40dd-a19f-6ec86a4f2c64",
+  "episode_id": "7a0a73de-66c0-4ff1-ad4b-138c8e003fed",
+  "human_approved": true,
+  "mlflow_run_id": null,
+  "prescription": {
+    "confidence": 0.638235294117647,
+    "operations": [
+      {
+        "column": "customer_name",
+        "default": null,
+        "op": "rename",
+        "target_column": "name",
+        "target_type": null
+      }
+    ],
+    "table": "customers_rename"
+  },
+  "status": "succeeded",
+  "table": "customers_rename",
+  "token_usage": {
+    "completion_tokens": 14,
+    "prompt_tokens": 203,
+    "total_cost_usd": 0.000518,
+    "total_tokens": 217
+  },
+  "trace_id": "tr-e24f25dbbd71dbee1f9825c541dde627",
+  "verification_message": "schema repair applied and verified"
+}
