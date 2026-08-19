@@ -33,6 +33,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import click
+from pydantic import ValidationError
 
 from self_healing_pipeline.infrastructure.logging.logger import configure_logging
 
@@ -75,6 +76,15 @@ from self_healing_pipeline.domain.interfaces.services.repair_trace_tracer import
 from self_healing_pipeline.domain.value_objects.failure_class import FailureClass
 from self_healing_pipeline.infrastructure.agents.langgraph_csv_repair_agent import (
     LangGraphCsvRepairAgent,
+)
+from self_healing_pipeline.infrastructure.cloud.azure_blob_uploader import AzureBlobSasUploader
+from self_healing_pipeline.infrastructure.cloud.cloud_integration_service import (
+    CloudIntegrationService,
+)
+from self_healing_pipeline.infrastructure.cloud.databricks_job_trigger import DatabricksJobTrigger
+from self_healing_pipeline.infrastructure.config.cloud_settings import (
+    load_azure_storage_settings,
+    load_databricks_settings,
 )
 from self_healing_pipeline.infrastructure.config.settings import get_settings
 from self_healing_pipeline.infrastructure.csv.local_csv_failure_detector import (
@@ -318,6 +328,130 @@ def schema_repair(table: str, file_path: str, episode_id_option: str | None) -> 
 
     if result.status.value not in ("succeeded", "healthy"):
         sys.exit(1)
+
+
+def _build_cloud_integration_service() -> tuple[CloudIntegrationService, list[str]]:
+    """Best-effort construction of the optional cloud-integration service.
+
+    Never raises: any piece of configuration that is missing or invalid
+    is treated as "that half is not configured" — never a reason to fail
+    `repair-and-process` itself. Returns the service plus human-readable
+    notes about what was/wasn't configured, for the CLI to echo.
+    """
+    notes: list[str] = []
+
+    uploader: AzureBlobSasUploader | None
+    try:
+        storage_settings = load_azure_storage_settings()
+        uploader = AzureBlobSasUploader(
+            container_url=storage_settings.container_url, sas_token=storage_settings.sas_token
+        )
+    except ValidationError:
+        uploader = None
+        notes.append(
+            "Azure Storage is not configured "
+            "(AZURE_STORAGE_CONTAINER_URL/AZURE_STORAGE_SAS_TOKEN) — cloud upload skipped."
+        )
+
+    trigger: DatabricksJobTrigger | None
+    try:
+        databricks_settings = load_databricks_settings()
+        trigger = DatabricksJobTrigger(
+            host=databricks_settings.host,
+            token=databricks_settings.token,
+            job_id=databricks_settings.job_id,
+            param_name=databricks_settings.notebook_param_name,
+        )
+    except ValidationError:
+        trigger = None
+        notes.append(
+            "Databricks is not configured "
+            "(DATABRICKS_HOST/DATABRICKS_TOKEN/DATABRICKS_JOB_ID) — job trigger skipped."
+        )
+
+    return CloudIntegrationService(uploader=uploader, trigger=trigger), notes
+
+
+@cli.command(name="repair-and-process")
+@click.argument("file_path", type=click.Path(exists=True, dir_okay=False))
+def repair_and_process(file_path: str) -> None:
+    """Run the existing Tier 1 `repair` pipeline unchanged, then — only if
+    the repair succeeded and produced a repaired output file — optionally
+    upload that output to Azure Blob Storage and trigger a downstream
+    Databricks job.
+
+    This command duplicates none of `repair`'s actual repair logic: it
+    calls the exact same `LocalCsvFailureDetector`,
+    `build_production_error_router()`, and `flush_traces()` that `repair`
+    does, in the same order, with the same behavior. The cloud step is
+    strictly additive and optional — with no AZURE_STORAGE_*/DATABRICKS_*
+    configuration present, this command's repair behavior and exit code
+    are identical to `repair`. A failure in the cloud step never
+    modifies or removes the local repaired file, and is reported
+    separately from the repair's own success/failure: exit code 1 means
+    the repair itself failed (identical meaning to `repair`); exit code 2
+    means the repair succeeded but the cloud step, having been
+    configured, failed.
+    """
+    detector = LocalCsvFailureDetector()
+    failure_class = detector.detect(file_path)
+
+    if failure_class is None:
+        click.echo(f"HEALTHY: {file_path} already parses correctly. No repair needed.")
+        return
+
+    error_cls = _FAILURE_CLASS_TO_ERROR[failure_class]
+    error: PipelineError = error_cls(
+        f"Detected {failure_class.value} in {file_path}", file_path=file_path
+    )
+
+    router = build_production_error_router()
+    try:
+        result = router.route(error)
+    finally:
+        flush_traces()
+
+    click.echo(f"failure_class: {failure_class.value}")
+    click.echo(f"success: {result.success}")
+    click.echo(f"applied: {result.applied}")
+    if result.source_path is not None:
+        click.echo(f"source_path: {result.source_path}")
+    if result.output_path is not None:
+        click.echo(f"output_path: {result.output_path}")
+    if result.prescription is not None:
+        click.echo(f"prescription: {result.prescription.model_dump_json()}")
+    click.echo(f"message: {result.message}")
+
+    if not result.applied or result.output_path is None:
+        click.echo("")
+        click.echo("cloud_integration: skipped (repair did not produce an output file to process)")
+        if not result.success:
+            sys.exit(1)
+        return
+
+    click.echo("")
+    click.echo("--- cloud integration (optional) ---")
+    service, notes = _build_cloud_integration_service()
+    for note in notes:
+        click.echo(note)
+
+    outcome = service.process(local_file_path=result.output_path)
+    click.echo(f"uploaded: {outcome.uploaded}")
+    if outcome.cloud_path is not None:
+        click.echo(f"cloud_path: {outcome.cloud_path}")
+    if outcome.upload_error is not None:
+        click.echo(f"upload_error: {outcome.upload_error}")
+    click.echo(f"databricks_triggered: {outcome.triggered}")
+    if outcome.databricks_run_id is not None:
+        click.echo(f"databricks_run_id: {outcome.databricks_run_id}")
+    if outcome.trigger_error is not None:
+        click.echo(f"trigger_error: {outcome.trigger_error}")
+    click.echo(f"cloud_message: {outcome.message}")
+
+    if not result.success:
+        sys.exit(1)
+    if outcome.upload_error is not None or outcome.trigger_error is not None:
+        sys.exit(2)
 
 
 if __name__ == "__main__":
