@@ -217,11 +217,20 @@ def _make_propose_node() -> Any:
         confidences: list[float] = []
 
         for rename in state["confirmed_renames"]:
+            # `rename.added_column` is the column *currently present* in the
+            # data (unknown to the baseline); `rename.removed_column` is the
+            # column the baseline *expects* but the data doesn't have. The
+            # repair must rename the incoming column to the baseline's
+            # expected name — i.e. `column` (rename FROM) is the current
+            # name, `target_column` (rename TO) is the baseline name.
+            # `PandasSchemaExecutor` renames `column` -> `target_column`
+            # verbatim, so this ordering is what makes that rename real
+            # rather than a no-op against a column name the file never had.
             operations.append(
                 SchemaRepairOperation(
                     op=OperationType.RENAME,
-                    column=rename.removed_column,
-                    target_column=rename.added_column,
+                    column=rename.added_column,
+                    target_column=rename.removed_column,
                 )
             )
             confidences.append(rename.confidence)

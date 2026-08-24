@@ -359,6 +359,41 @@ def test_human_approval_allows_apply_end_to_end_added_column(tmp_path: Path) -> 
 # --- end-to-end drift modes ----------------------------------------------
 
 
+def test_end_to_end_rename_repair_renames_incoming_column_to_baseline_name(tmp_path: Path) -> None:
+    """Rename mode: the incoming file has a column the baseline doesn't
+    recognize ("customer_name"), and the baseline expects a differently
+    named column ("name") that's missing from the incoming data. The
+    repair must rename the INCOMING column to the BASELINE's expected
+    name (id,customer_name,age -> id,name,age), not the other way
+    around — regression test for the rename-direction fix in `propose`."""
+    file_path = _write_csv(tmp_path, "customers.csv", "id,customer_name,age\n1,Alice,30\n2,Bob,25\n")
+    graph = build_schema_repair_workflow(
+        baseline_store=_FakeBaselineStore(BASELINE),  # baseline: id, name, age
+        inspector=PandasSchemaInspector(),
+        history_store=_InMemoryHistoryStore(),
+        confirmation_port=_AlwaysConfirmConfirmationPort(),
+        approval_port=_RecordingApprovalPort(approved=True),
+        executor=PandasSchemaExecutor(),
+    )
+
+    final_state = graph.invoke(
+        build_initial_schema_repair_state(episode_id=uuid4(), table="customers", file_path=file_path)
+    )
+
+    assert final_state["status"] is SchemaRepairStatus.SUCCEEDED
+    assert final_state["validated_operations"] is not None
+    rename_op = final_state["validated_operations"][0]
+    assert rename_op.op is OperationType.RENAME
+    assert rename_op.column == "customer_name"  # rename FROM the incoming column name
+    assert rename_op.target_column == "name"  # rename TO the baseline's expected name
+
+    import pandas as pd
+
+    frame = pd.read_csv(file_path)
+    assert list(frame.columns) == ["id", "name", "age"]
+    assert "customer_name" not in frame.columns
+
+
 def test_end_to_end_removed_column_repair(tmp_path: Path) -> None:
     """"Removed column" mode (spec's own example: baseline has a column
     the current data is missing) is healed by adding it back with a

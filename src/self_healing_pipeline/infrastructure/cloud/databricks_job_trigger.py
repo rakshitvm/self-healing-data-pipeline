@@ -13,10 +13,18 @@ observability contracts (`TrackingOutcome`, `CsvExecutionOutcome`). It
 never touches the local filesystem — it only ever sends `cloud_path`
 (a plain string) as a job parameter.
 
+Sent via the `job_parameters` field, not the legacy `notebook_params`/
+`jar_params`/`python_params`/`spark_submit_params`/`sql_params` fields:
+`run-now` rejects the legacy fields with HTTP 400 `INVALID_PARAMETER_VALUE`
+whenever the target job has "Job parameters" configured (Databricks'
+current, unified parameter mechanism) rather than legacy per-task-type
+parameter mapping. See "Trigger a new job run":
+https://docs.databricks.com/api/workspace/jobs/runnow
+
 The job-parameter *key* your Databricks job actually expects depends on
-how that job/notebook was authored — this project has no way to know
-that in advance, so it is configurable (`param_name`) rather than
-guessed; see `DatabricksSettings` in `infrastructure/config/cloud_settings.py`.
+how that job was configured — this project has no way to know that in
+advance, so it is configurable (`param_name`) rather than guessed; see
+`DatabricksSettings` in `infrastructure/config/cloud_settings.py`.
 """
 
 from __future__ import annotations
@@ -48,8 +56,9 @@ class DatabricksJobTrigger:
         personal access token, only ever used as a bearer credential on
         this one request, never logged. `job_id` must already exist in
         the target workspace — this class never creates or discovers
-        jobs. `param_name` is the notebook-parameter key the target
-        job's notebook task is written to read (see module docstring).
+        jobs. `param_name` is the job-parameter key configured on the
+        target Databricks Job, which its notebook task reads via
+        `dbutils.widgets` (see module docstring).
         """
         self._host = host.rstrip("/")
         self._token = token
@@ -58,10 +67,11 @@ class DatabricksJobTrigger:
 
     def trigger(self, *, cloud_path: str) -> TriggerOutcome:
         """Call `run-now` for the configured job, passing `cloud_path` as
-        the single notebook parameter named `param_name`."""
+        the single job parameter named `param_name`, via the current
+        `job_parameters` field (not the legacy `notebook_params`)."""
         url = f"{self._host}/api/2.1/jobs/run-now"
         payload = json.dumps(
-            {"job_id": self._job_id, "notebook_params": {self._param_name: cloud_path}}
+            {"job_id": self._job_id, "job_parameters": {self._param_name: cloud_path}}
         ).encode()
 
         request = urllib.request.Request(

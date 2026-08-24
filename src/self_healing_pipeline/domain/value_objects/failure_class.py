@@ -18,4 +18,5 @@ class FailureClass(str, Enum):
     HEADER_DETECTION = "header_detection"
     ENGINE_SELECTION = "engine_selection"
     SINGLE_COLUMN_MALFORMATION = "single_column_malformation"
+    SCHEMA_DRIFT = "schema_drift"
     UNKNOWN = "unknown"

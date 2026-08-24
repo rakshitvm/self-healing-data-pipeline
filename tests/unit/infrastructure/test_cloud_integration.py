@@ -259,10 +259,11 @@ class TestDatabricksJobTrigger:
         body = json.loads(request["body"])
         assert body == {
             "job_id": 99,
-            "notebook_params": {
+            "job_parameters": {
                 "repaired_csv_path": "https://example.blob.core.windows.net/c/x.csv"
             },
         }
+        assert "notebook_params" not in body  # legacy field must not be used
 
     def test_strips_trailing_slash_from_host(
         self, fake_server: tuple[str, type[_RecordingHandler]]
