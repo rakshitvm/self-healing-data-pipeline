@@ -58,7 +58,12 @@ Node responsibilities:
   `state["output_path"]` / `RepairResult.output_path`.
   `RepairResult.applied` is only ever `True` once that new file has
   actually been written, never merely because the corrected prescription
-  parsed in memory.
+  parsed in memory. `MIXED_DELIMITER` is the one exception to "one
+  `CsvRepairParams`, one whole-file `pd.read_csv` call": when
+  `params.mixed_delimiter_rows` is non-empty, `apply`/`reverify`
+  delegate to the separately-injected `mixed_delimiter_executor`
+  instead — still just a `CsvRepairExecutor`, still selected purely by
+  data already on `params`, no new graph nodes or edges.
 - `reverify`: an independent, read-only check of the *repaired output*
   file (`state["output_path"]`), via `CsvRepairExecutor.verify` — never
   the source, and it never writes anything. If `apply` produced no
@@ -100,6 +105,9 @@ from self_healing_pipeline.domain.interfaces.services.csv_repair_proposal_port i
 )
 from self_healing_pipeline.domain.value_objects.csv_repair_params import CsvRepairParams
 from self_healing_pipeline.domain.value_objects.failure_class import FailureClass
+from self_healing_pipeline.domain.value_objects.mixed_delimiter_row_repair import (
+    MixedDelimiterRowRepair,
+)
 from self_healing_pipeline.domain.value_objects.pipeline_status import RepairEpisodeStatus
 from self_healing_pipeline.domain.value_objects.repair_result import RepairResult
 from self_healing_pipeline.infrastructure.logging.logger import get_logger
@@ -266,7 +274,7 @@ def _detect_encoding(file_path: str) -> chardet.DetectionDict | None:
     return detected
 
 
-def _make_propose_node(llm_port: CsvRepairProposalPort) -> Any:
+def _make_propose_node(llm_port: CsvRepairProposalPort, detector: CsvFailureDetector) -> Any:
     def propose(state: CsvRepairWorkflowState) -> dict[str, Any]:
         logger = get_logger(agent="CsvRepairAgent", node="propose", table=None)
 
@@ -297,6 +305,38 @@ def _make_propose_node(llm_port: CsvRepairProposalPort) -> Any:
                     f"Deterministic encoding detection (chardet): {detected_encoding} "
                     f"(confidence={detected['confidence']:.2f})\n{sample}"
                 )
+
+        # MIXED_DELIMITER evidence: computed deterministically over the
+        # WHOLE file by the detector (never limited by the sample cap
+        # above), and only the flagged rows' evidence — not the whole
+        # file — is added to what the LLM sees. Neither the established
+        # delimiter nor which rows are affected is ever left to the LLM
+        # to discover or decide; both are force-corrected below,
+        # regardless of what (if anything) the LLM proposes for them.
+        established_delimiter: str | None = None
+        mixed_delimiter_rows: tuple[MixedDelimiterRowRepair, ...] = ()
+        if FailureClass.MIXED_DELIMITER in failure_classes:
+            detect_evidence = getattr(detector, "detect_mixed_delimiter_evidence", None)
+            if callable(detect_evidence):
+                established_delimiter, mixed_delimiter_rows = detect_evidence(
+                    state["file_path"]
+                )
+                if mixed_delimiter_rows:
+                    evidence_lines = "\n".join(
+                        f"  Row {r.row_number}: {r.original_text!r} — established "
+                        f"delimiter {established_delimiter!r} expects "
+                        f"{r.expected_field_count} fields, found {r.actual_field_count}; "
+                        f"observed delimiter {r.observed_delimiter!r} produces "
+                        f"{r.expected_field_count} fields."
+                        for r in mixed_delimiter_rows
+                    )
+                    sample = (
+                        "Deterministic mixed-delimiter detection: "
+                        f"{len(mixed_delimiter_rows)} row(s) do not match the "
+                        f"established delimiter {established_delimiter!r}:\n"
+                        f"{evidence_lines}\n{sample}"
+                    )
+
         raw = llm_port.propose(
             failure_class=failure_class,
             sample=sample,
@@ -308,6 +348,16 @@ def _make_propose_node(llm_port: CsvRepairProposalPort) -> Any:
             # only it — is corrected here. The result still flows through
             # the unchanged `validate` node before ever reaching `apply`.
             raw = {**raw, "encoding": detected_encoding}
+        if mixed_delimiter_rows and isinstance(raw, dict):
+            # Same override pattern as WRONG_ENCODING above: both fields
+            # are deterministically known, so both are corrected here
+            # unconditionally — the LLM's own delimiter guess (and its
+            # complete lack of per-row information) is discarded.
+            raw = {
+                **raw,
+                "delimiter": established_delimiter,
+                "mixed_delimiter_rows": [r.model_dump() for r in mixed_delimiter_rows],
+            }
 
         logger.info(
             "node_completed",
@@ -372,6 +422,7 @@ def _make_human_approval_node(approval_port: CsvHumanApprovalPort | None) -> Any
                 file_path=state["file_path"],
                 failure_classes=state["failure_classes"],
                 prescription=params,
+                mixed_delimiter_rows=params.mixed_delimiter_rows,
             )
             approved = approval_port.request_approval(request)
 
@@ -386,13 +437,50 @@ def _route_after_human_approval(state: CsvRepairWorkflowState) -> str:
     return "apply" if state["human_approved"] else "rejected"
 
 
-def _make_apply_node(executor: CsvRepairExecutor) -> Any:
+def _select_executor(
+    params: CsvRepairParams,
+    executor: CsvRepairExecutor,
+    mixed_delimiter_executor: CsvRepairExecutor | None,
+) -> tuple[CsvRepairExecutor, CsvExecutionOutcome | None]:
+    """Pick which `CsvRepairExecutor` applies/verifies `params`.
+
+    `PandasCsvRepairExecutor` (the injected `executor`, used by every
+    other Tier 1 dimension) is never touched or given a
+    `mixed_delimiter_rows` prescription it wasn't designed for:
+    MIXED_DELIMITER routes to the separately-injected
+    `mixed_delimiter_executor` instead, selected purely by data already
+    on `params` — no new graph nodes or edges. If a MIXED_DELIMITER
+    prescription reaches here without one wired in, fail safe (an
+    unsuccessful outcome) rather than silently falling back to the
+    whole-file pandas executor, which cannot correctly apply per-row
+    exceptions.
+    """
+    if not params.mixed_delimiter_rows:
+        return executor, None
+    if mixed_delimiter_executor is None:
+        return executor, CsvExecutionOutcome(
+            success=False,
+            validation_errors=["no_mixed_delimiter_executor_configured"],
+            message=(
+                "This prescription carries mixed_delimiter_rows but no "
+                "mixed_delimiter_executor was injected into the workflow."
+            ),
+        )
+    return mixed_delimiter_executor, None
+
+
+def _make_apply_node(
+    executor: CsvRepairExecutor, mixed_delimiter_executor: CsvRepairExecutor | None = None
+) -> Any:
     def apply(state: CsvRepairWorkflowState) -> dict[str, Any]:
         logger = get_logger(agent="CsvRepairAgent", node="apply", table=None)
 
         params = state["validated_params"]
         assert params is not None  # guaranteed by _route_after_validation
-        outcome = executor.execute(state["file_path"], params)
+        chosen_executor, failure = _select_executor(params, executor, mixed_delimiter_executor)
+        outcome = failure if failure is not None else chosen_executor.execute(
+            state["file_path"], params
+        )
         result = RepairResult(
             success=outcome.success,
             applied=outcome.success,
@@ -418,7 +506,9 @@ def _make_apply_node(executor: CsvRepairExecutor) -> Any:
     return apply
 
 
-def _make_reverify_node(executor: CsvRepairExecutor) -> Any:
+def _make_reverify_node(
+    executor: CsvRepairExecutor, mixed_delimiter_executor: CsvRepairExecutor | None = None
+) -> Any:
     def reverify(state: CsvRepairWorkflowState) -> dict[str, Any]:
         logger = get_logger(agent="CsvRepairAgent", node="reverify", table=None)
 
@@ -436,7 +526,10 @@ def _make_reverify_node(executor: CsvRepairExecutor) -> Any:
                 message="No repaired output file was created by apply; nothing to reverify.",
             )
         else:
-            outcome = executor.verify(output_path, params)
+            chosen_executor, failure = _select_executor(params, executor, mixed_delimiter_executor)
+            outcome = failure if failure is not None else chosen_executor.verify(
+                output_path, params
+            )
 
         logger.info(
             "node_completed",
@@ -502,6 +595,7 @@ def build_csv_repair_workflow(
     llm_port: CsvRepairProposalPort,
     approval_port: CsvHumanApprovalPort | None = None,
     max_sample_lines: int = DEFAULT_MAX_SAMPLE_LINES,
+    mixed_delimiter_executor: CsvRepairExecutor | None = None,
 ) -> CompiledStateGraph[CsvRepairWorkflowState, None, Any, Any]:
     """Build and compile the Tier 1 CSV repair `StateGraph`.
 
@@ -513,7 +607,15 @@ def build_csv_repair_workflow(
 
     `detector`, `executor`, and `llm_port` are injected ports (Dependency
     Inversion) — this function contains no pandas, filesystem repair, or
-    LLM-provider code of its own.
+    LLM-provider code of its own. `mixed_delimiter_executor` is a second,
+    optional `CsvRepairExecutor` used only for `MIXED_DELIMITER`
+    prescriptions (selected purely by data on `params`, see
+    `_select_executor`) — `executor` itself never receives a
+    `mixed_delimiter_rows` prescription. Omitting it (the default)
+    reproduces prior behavior exactly for every other failure class;
+    only a genuine `MIXED_DELIMITER` repair needs it, and fails safe
+    (rather than silently misapplying the whole-file `executor`) if it's
+    needed but wasn't provided.
     """
     graph = StateGraph(CsvRepairWorkflowState)
 
@@ -521,11 +623,11 @@ def build_csv_repair_workflow(
     graph.add_node(SAMPLE_TOOL_NODE_NAME, ToolNode([sample_csv_file], name=SAMPLE_TOOL_NODE_NAME))
     graph.add_node("extract_sample", _extract_sample)
     graph.add_node("diagnose", _make_diagnose_node(detector))
-    graph.add_node("propose", _make_propose_node(llm_port))
+    graph.add_node("propose", _make_propose_node(llm_port, detector))
     graph.add_node("validate", _validate)
     graph.add_node("human_approval", _make_human_approval_node(approval_port))
-    graph.add_node("apply", _make_apply_node(executor))
-    graph.add_node("reverify", _make_reverify_node(executor))
+    graph.add_node("apply", _make_apply_node(executor, mixed_delimiter_executor))
+    graph.add_node("reverify", _make_reverify_node(executor, mixed_delimiter_executor))
     graph.add_node("increment_retry", _increment_retry)
     graph.add_node("set_success", _set_success)
     graph.add_node("set_failure", _set_failure)

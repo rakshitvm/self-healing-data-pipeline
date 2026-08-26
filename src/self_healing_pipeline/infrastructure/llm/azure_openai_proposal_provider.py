@@ -88,7 +88,7 @@ class AzureOpenAIProposalProvider:
             if content is None:
                 return {}
             parsed = json.loads(content)
-        except Exception:  # noqa: BLE001 - any failure here becomes an invalid proposal, not a crash
+        except Exception:  
             return {}
 
         return parsed if isinstance(parsed, dict) else {}

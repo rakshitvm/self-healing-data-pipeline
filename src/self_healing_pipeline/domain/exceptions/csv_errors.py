@@ -75,3 +75,11 @@ class SingleColumnMalformationError(CsvRepairError):
     """Raised when a CSV file silently collapsed into a single column."""
 
     FAILURE_CLASS = FailureClass.SINGLE_COLUMN_MALFORMATION
+
+
+class MixedDelimiterError(CsvRepairError):
+    """Raised when a minority of rows use a different delimiter than the
+    file's established one (e.g. one semicolon-delimited row in an
+    otherwise comma-delimited file)."""
+
+    FAILURE_CLASS = FailureClass.MIXED_DELIMITER

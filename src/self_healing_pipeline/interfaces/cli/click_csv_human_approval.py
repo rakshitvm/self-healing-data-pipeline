@@ -28,6 +28,16 @@ class ClickCsvHumanApprovalPort:
             click.echo(f"  - {failure_class}")
         click.echo("")
         click.echo(f"Proposed combined prescription: {request.prescription.model_dump_json()}")
+
+        if request.mixed_delimiter_rows:
+            click.echo("")
+            click.echo(f"Expected delimiter: {request.prescription.delimiter}")
+            for row in request.mixed_delimiter_rows:
+                click.echo(f"Affected row: {row.row_number}")
+                click.echo(f"Observed delimiter: {row.observed_delimiter}")
+                click.echo("Proposed repair:")
+                click.echo(f"  {row.original_text} -> {row.repaired_text}")
+
         click.echo("")
 
         return click.confirm("Approve combined repair?", default=False)

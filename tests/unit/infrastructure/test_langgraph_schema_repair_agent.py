@@ -143,11 +143,11 @@ def test_no_drift_returns_success_true_applied_false_and_skips_llm(tmp_path: Pat
     assert confirmation_port.calls == 0
 
 
-def test_added_column_drift_is_repaired_and_output_path_is_the_same_file(tmp_path: Path) -> None:
+def test_added_column_drift_is_repaired_to_a_separate_output_file(tmp_path: Path) -> None:
     """Proves the adapter genuinely drives the canonical StateGraph (real
     `PandasSchemaExecutor` against a real file), and that the resulting
-    `output_path` equals `file_path` — Tier 2 mutates the file in place,
-    unlike Tier 1's separate `repaired/<name>` path."""
+    `output_path` is a *separate* `repaired/<name>` file — mirroring
+    Tier 1 exactly, the source is never touched."""
     file_path = _write(tmp_path, "customers.csv", "id,name,age,city\n1,Alice,30,Rome\n")
     agent = _agent(baseline=BASELINE, columns=(*BASELINE.columns, ColumnDefinition(name="city", type="string")))
     error = SchemaDriftError("check", table_name="customers", file_path=file_path)
@@ -156,10 +156,13 @@ def test_added_column_drift_is_repaired_and_output_path_is_the_same_file(tmp_pat
 
     assert result.success is True
     assert result.applied is True
-    assert result.output_path == file_path
+    assert result.output_path is not None
+    assert result.output_path != file_path
     assert result.source_path == file_path
-    # "city" (unknown to the baseline) was dropped by the existing workflow
-    assert "city" not in Path(file_path).read_text(encoding="utf-8").splitlines()[0]
+    # the source is never touched
+    assert "city" in Path(file_path).read_text(encoding="utf-8").splitlines()[0]
+    # "city" (unknown to the baseline) was dropped in the separate output file
+    assert "city" not in Path(result.output_path).read_text(encoding="utf-8").splitlines()[0]
 
 
 def test_rename_drift_renames_incoming_column_to_baseline_name(tmp_path: Path) -> None:
@@ -182,7 +185,11 @@ def test_rename_drift_renames_incoming_column_to_baseline_name(tmp_path: Path) -
     assert result.success is True
     assert result.applied is True
     assert confirmation_port.calls >= 1
-    columns = Path(file_path).read_text(encoding="utf-8").splitlines()[0].split(",")
+    # the source is never touched
+    source_columns = Path(file_path).read_text(encoding="utf-8").splitlines()[0].split(",")
+    assert source_columns == ["id", "customer_name", "age"]
+    assert result.output_path is not None
+    columns = Path(result.output_path).read_text(encoding="utf-8").splitlines()[0].split(",")
     assert columns == ["id", "name", "age"]
     assert "customer_name" not in columns
 

@@ -23,11 +23,10 @@ both tiers with no special-casing):
   The cloud-integration step is skipped, exactly as it already is for a
   healthy Tier 1 file today.
 - `SUCCEEDED` (approved, applied, verified): `success=True,
-  applied=True, output_path=error.file_path`. Unlike Tier 1 (which
-  writes repaired output to a separate `repaired/<name>` path, never
-  touching the source), Tier 2's existing `PandasSchemaExecutor` mutates
-  `file_path` in place (unmodified, pre-existing behavior) — so the
-  repaired file *is* `error.file_path` itself once `SUCCEEDED`.
+  applied=True, output_path=result.output_path`. Mirroring Tier 1
+  exactly, `PandasSchemaExecutor` never touches the source file: the
+  repaired file is written to a separate `repaired/<name>` path
+  alongside it, reported here as `output_path`.
 - `REJECTED` / `FAILED` / `INVALID` (including "no baseline found"):
   `success=False, applied=False` — the cloud step is skipped and the
   CLI exits non-zero, exactly as an unsuccessful Tier 1 repair already
@@ -110,7 +109,7 @@ class LangGraphSchemaRepairAgent:
                 applied=True,
                 confidence=result.confidence,
                 source_path=error.file_path,
-                output_path=error.file_path,
+                output_path=result.output_path,
                 message=result.message,
             )
 

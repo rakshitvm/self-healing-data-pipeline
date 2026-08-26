@@ -42,6 +42,7 @@ class SchemaRepairResult(BaseModel):
     human_approved: bool | None = None
     validation_errors: list[str] = Field(default_factory=list)
     message: str | None = None
+    output_path: str | None = None
 
     @property
     def success(self) -> bool:

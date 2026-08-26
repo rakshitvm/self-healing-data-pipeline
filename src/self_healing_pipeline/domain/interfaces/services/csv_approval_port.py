@@ -18,16 +18,26 @@ from pydantic import BaseModel, ConfigDict
 
 from self_healing_pipeline.domain.value_objects.csv_repair_params import CsvRepairParams
 from self_healing_pipeline.domain.value_objects.failure_class import FailureClass
+from self_healing_pipeline.domain.value_objects.mixed_delimiter_row_repair import (
+    MixedDelimiterRowRepair,
+)
 
 
 class CsvApprovalRequest(BaseModel):
-    """Everything a human (or any approval mechanism) needs to decide."""
+    """Everything a human (or any approval mechanism) needs to decide.
+
+    `mixed_delimiter_rows` mirrors `prescription.mixed_delimiter_rows`
+    exactly — surfaced as its own field so an approval port can display
+    per-row evidence without reaching into `prescription`. Empty for
+    every failure class except `MIXED_DELIMITER`.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid", str_strip_whitespace=True)
 
     file_path: str
     failure_classes: frozenset[FailureClass]
     prescription: CsvRepairParams
+    mixed_delimiter_rows: tuple[MixedDelimiterRowRepair, ...] = ()
 
 
 @runtime_checkable

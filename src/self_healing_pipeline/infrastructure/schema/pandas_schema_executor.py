@@ -2,13 +2,20 @@
 
 The only place allowed to import pandas for schema repair purposes,
 mirroring `PandasCsvRepairExecutor`'s isolation of pandas to a single
-adapter. `execute` mutates the file in place (rename/cast/drop/
-add_default, applied in the caller-supplied order — callers are
-responsible for having already normalized it via
-`normalize_operation_order`). `verify` never re-applies anything; it
-re-reads the (now-modified) file and independently confirms each
-operation's target end-state actually holds.
+adapter. `execute` **never modifies the source file**: it reads
+`file_path`, applies the given operations (rename/cast/drop/
+add_default) to an in-memory frame, and — only on success — atomically
+writes a *separate* repaired file at `<source directory>/repaired/
+<source filename>` (creating that directory if needed), mirroring
+`PandasCsvRepairExecutor` exactly. `verify` never writes; given a path
+(in practice, the `output_path` `execute` just produced), it
+independently re-reads that file and confirms each operation's target
+end-state actually holds.
 """
+
+import os
+import tempfile
+from pathlib import Path
 
 import pandas as pd
 
@@ -26,9 +33,57 @@ _PANDAS_CAST_TYPE: dict[str, str] = {
     "datetime": "datetime64[ns]",
 }
 
+_REPAIRED_SUBDIR_NAME = "repaired"
+
+
+def _resolve_output_path(source_path: str) -> Path:
+    """Compute the repaired-output path for `source_path`: the same
+    filename, in a `repaired/` subdirectory alongside the source. Pure
+    and read-only — does not touch the filesystem."""
+    source = Path(source_path).resolve()
+    return source.parent / _REPAIRED_SUBDIR_NAME / source.name
+
+
+def _refuse_if_output_collides_with_source(
+    source_path: str, output_path: Path
+) -> SchemaExecutionOutcome | None:
+    """Safety net (defense in depth, mirrors Tier 1's own guard): if the
+    resolved output path would ever equal the resolved source path, fail
+    safely rather than write anything — the source must never be
+    overwritten, no matter how the output path was computed."""
+    if output_path.resolve() == Path(source_path).resolve():
+        return SchemaExecutionOutcome(
+            success=False,
+            validation_errors=["output_path_collides_with_source"],
+            message=(
+                f"Refusing to repair {source_path!r}: the computed output path "
+                "equals the source path. The source file is never modified."
+            ),
+        )
+    return None
+
+
+def _atomic_write_csv(frame: pd.DataFrame, output_path: Path) -> None:
+    """Write `frame` to `output_path` without risking a partially-written
+    or corrupted output on failure: write to a fresh temp file in the
+    same directory first, then atomically swap it into place with
+    `os.replace` — `output_path` is only ever touched by that final,
+    atomic step, and the source file (elsewhere entirely) is never
+    touched at all."""
+    directory = output_path.parent
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".tmp-schema-repair-", suffix=".csv")
+    os.close(fd)
+    try:
+        frame.to_csv(tmp_path, index=False, encoding="utf-8")
+        os.replace(tmp_path, output_path)
+    except Exception:
+        os.remove(tmp_path)
+        raise
+
 
 class PandasSchemaExecutor:
-    """Concrete `SchemaExecutor` that mutates local CSV files with pandas."""
+    """Concrete `SchemaExecutor` that repairs local CSV files with pandas,
+    never touching the source file."""
 
     def execute(
         self, file_path: str, operations: tuple[SchemaRepairOperation, ...]
@@ -37,17 +92,33 @@ class PandasSchemaExecutor:
             frame = pd.read_csv(file_path)
             for operation in operations:
                 frame = _apply_operation(frame, operation)
-            frame.to_csv(file_path, index=False)
         except Exception as exc:  # noqa: BLE001 - any failure is a valid, reportable outcome
             return SchemaExecutionOutcome(
                 success=False,
                 validation_errors=[f"{type(exc).__name__}: {exc}"],
                 message=f"Failed to apply schema repair to {file_path!r}.",
             )
+
+        output_path = _resolve_output_path(file_path)
+        collision = _refuse_if_output_collides_with_source(file_path, output_path)
+        if collision is not None:
+            return collision
+
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_csv(frame, output_path)
+        except Exception as exc:  # noqa: BLE001 - a failed write is a valid, reportable outcome
+            return SchemaExecutionOutcome(
+                success=False,
+                validation_errors=[f"{type(exc).__name__}: {exc}"],
+                message=f"Applied operations to {file_path!r} but failed to write the repaired output.",
+            )
+
         return SchemaExecutionOutcome(
             success=True,
-            message=f"Applied {len(operations)} operation(s) to {file_path!r}: "
-            f"{list(frame.columns)}.",
+            output_path=str(output_path),
+            message=f"Applied {len(operations)} operation(s) from {file_path!r} to "
+            f"{str(output_path)!r}: {list(frame.columns)}.",
         )
 
     def verify(

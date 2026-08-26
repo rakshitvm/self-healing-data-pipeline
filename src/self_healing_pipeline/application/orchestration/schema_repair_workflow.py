@@ -103,6 +103,7 @@ class SchemaRepairWorkflowState(TypedDict):
     episode_id: UUID
     table: str
     file_path: str
+    output_path: str | None
     baseline: SchemaBaseline | None
     current_schema: tuple[ColumnDefinition, ...]
     diff: ColumnDiff | None
@@ -127,6 +128,7 @@ def build_initial_schema_repair_state(
         episode_id=episode_id,
         table=table,
         file_path=file_path,
+        output_path=None,
         baseline=None,
         current_schema=(),
         diff=None,
@@ -391,7 +393,7 @@ def _make_apply_node(executor: SchemaExecutor) -> Any:
 
         logger.info("node_completed", success=outcome.success, message=outcome.message)
 
-        return {"verification_outcome": outcome}
+        return {"verification_outcome": outcome, "output_path": outcome.output_path}
 
     return apply
 
@@ -401,7 +403,13 @@ def _make_verify_node(executor: SchemaExecutor) -> Any:
         logger = get_logger(agent="SchemaRepairAgent", node="verify", table=state["table"])
         assert state["validated_operations"] is not None
 
-        outcome = executor.verify(state["file_path"], tuple(state["validated_operations"]))
+        # `output_path` is only set when `apply` actually wrote a new
+        # file; if `apply` failed (no file written), fall back to the
+        # untouched source, which certainly won't hold the target
+        # end-state either — the same "verify against whatever is
+        # actually there" behavior this node has always had.
+        verify_path = state["output_path"] or state["file_path"]
+        outcome = executor.verify(verify_path, tuple(state["validated_operations"]))
 
         logger.info("node_completed", success=outcome.success, message=outcome.message)
 
@@ -521,4 +529,5 @@ def result_from_final_state(final_state: SchemaRepairWorkflowState) -> SchemaRep
         human_approved=final_state["human_approved"],
         validation_errors=final_state["validation_errors"],
         message=final_state["message"],
+        output_path=final_state["output_path"],
     )

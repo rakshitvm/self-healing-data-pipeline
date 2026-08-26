@@ -266,11 +266,14 @@ def test_added_column_is_repaired_and_reaches_cloud_integration(tmp_path: Path) 
     assert result.exit_code == 0
     assert "success: True" in result.output
     assert "applied: True" in result.output
-    assert f"output_path: {file_path}" in result.output
-    assert cloud_service.calls == [file_path]
+    assert "city" in Path(file_path).read_text(encoding="utf-8").splitlines()[0]  # source untouched
+    assert len(cloud_service.calls) == 1
+    output_path = cloud_service.calls[0]
+    assert output_path != file_path
+    assert f"output_path: {output_path}" in result.output
     assert "uploaded: True" in result.output
     assert "databricks_triggered: True" in result.output
-    assert "city" not in Path(file_path).read_text(encoding="utf-8").splitlines()[0]
+    assert "city" not in Path(output_path).read_text(encoding="utf-8").splitlines()[0]
 
 
 # --- F. removed column ----------------------------------------------------
@@ -288,8 +291,11 @@ def test_removed_column_is_repaired_and_reaches_cloud_integration(tmp_path: Path
 
     assert result.exit_code == 0
     assert "applied: True" in result.output
-    assert cloud_service.calls == [file_path]
-    assert "age" in Path(file_path).read_text(encoding="utf-8").splitlines()[0]
+    assert "age" not in Path(file_path).read_text(encoding="utf-8").splitlines()[0]  # source untouched
+    assert len(cloud_service.calls) == 1
+    output_path = cloud_service.calls[0]
+    assert output_path != file_path
+    assert "age" in Path(output_path).read_text(encoding="utf-8").splitlines()[0]
 
 
 # --- G. rename -------------------------------------------------------------
@@ -313,8 +319,12 @@ def test_rename_drift_is_resolved_and_reaches_cloud_integration(tmp_path: Path) 
     assert result.exit_code == 0
     assert "applied: True" in result.output
     assert confirmation_port.calls >= 1  # the rename-resolution subgraph genuinely ran
-    assert cloud_service.calls == [file_path]
-    columns = Path(file_path).read_text(encoding="utf-8").splitlines()[0].split(",")
+    source_columns = Path(file_path).read_text(encoding="utf-8").splitlines()[0].split(",")
+    assert source_columns == ["id", "name", "age"]  # source untouched
+    assert len(cloud_service.calls) == 1
+    output_path = cloud_service.calls[0]
+    assert output_path != file_path
+    columns = Path(output_path).read_text(encoding="utf-8").splitlines()[0].split(",")
     assert columns == ["id", "customer_name", "age"]  # renamed to the baseline's expected name
     assert "name" not in columns
 
@@ -339,8 +349,12 @@ def test_second_rename_baseline_is_resolved_and_reaches_cloud_integration(tmp_pa
     assert result.exit_code == 0
     assert "applied: True" in result.output
     assert confirmation_port.calls >= 1
-    assert cloud_service.calls == [file_path]
-    columns = Path(file_path).read_text(encoding="utf-8").splitlines()[0].split(",")
+    source_columns = Path(file_path).read_text(encoding="utf-8").splitlines()[0].split(",")
+    assert source_columns == ["id", "name", "age"]  # source untouched
+    assert len(cloud_service.calls) == 1
+    output_path = cloud_service.calls[0]
+    assert output_path != file_path
+    columns = Path(output_path).read_text(encoding="utf-8").splitlines()[0].split(",")
     assert columns == ["id", "full_name", "age"]
     assert "name" not in columns
 
@@ -360,7 +374,8 @@ def test_type_change_is_cast_verified_and_reaches_cloud_integration(tmp_path: Pa
 
     assert result.exit_code == 0
     assert "applied: True" in result.output
-    assert cloud_service.calls == [file_path]
+    assert len(cloud_service.calls) == 1
+    assert cloud_service.calls[0] != file_path
 
 
 # --- J. rejected -----------------------------------------------------------

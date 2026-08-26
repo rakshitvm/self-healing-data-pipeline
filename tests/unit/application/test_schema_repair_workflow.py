@@ -352,8 +352,11 @@ def test_human_approval_allows_apply_end_to_end_added_column(tmp_path: Path) -> 
 
     import pandas as pd
 
-    frame = pd.read_csv(file_path)
-    assert "country" not in frame.columns
+    # the source is never touched — mirrors Tier 1's own guarantee
+    assert "country" in pd.read_csv(file_path).columns
+    assert final_state["output_path"] is not None
+    assert final_state["output_path"] != file_path
+    assert "country" not in pd.read_csv(final_state["output_path"]).columns
 
 
 # --- end-to-end drift modes ----------------------------------------------
@@ -389,7 +392,10 @@ def test_end_to_end_rename_repair_renames_incoming_column_to_baseline_name(tmp_p
 
     import pandas as pd
 
-    frame = pd.read_csv(file_path)
+    # the source is never touched — mirrors Tier 1's own guarantee
+    assert list(pd.read_csv(file_path).columns) == ["id", "customer_name", "age"]
+    assert final_state["output_path"] is not None
+    frame = pd.read_csv(final_state["output_path"])
     assert list(frame.columns) == ["id", "name", "age"]
     assert "customer_name" not in frame.columns
 
@@ -421,8 +427,10 @@ def test_end_to_end_removed_column_repair(tmp_path: Path) -> None:
 
     import pandas as pd
 
-    frame = pd.read_csv(file_path)
-    assert "age" in frame.columns
+    # the source is never touched — mirrors Tier 1's own guarantee
+    assert "age" not in pd.read_csv(file_path).columns
+    assert final_state["output_path"] is not None
+    assert "age" in pd.read_csv(final_state["output_path"]).columns
 
 
 def test_end_to_end_type_change_repair(tmp_path: Path) -> None:

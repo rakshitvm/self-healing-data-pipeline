@@ -166,6 +166,7 @@ def test_structured_payload_is_serialized_as_json_safe() -> None:
         "encoding": "utf-8",
         "header_row": 0,
         "engine": "python",
+        "mixed_delimiter_rows": [],
     }
     assert isinstance(payload_param, psycopg2.extras.Json)
     assert payload_param.adapted == {

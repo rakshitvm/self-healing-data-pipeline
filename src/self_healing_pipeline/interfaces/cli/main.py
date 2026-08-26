@@ -53,6 +53,7 @@ from self_healing_pipeline.domain.exceptions.csv_errors import (
     CsvRepairError,
     EngineSelectionError,
     HeaderDetectionError,
+    MixedDelimiterError,
     SingleColumnMalformationError,
     WrongDelimiterError,
     WrongEncodingError,
@@ -93,6 +94,9 @@ from self_healing_pipeline.infrastructure.config.cloud_settings import (
 from self_healing_pipeline.infrastructure.config.settings import get_settings
 from self_healing_pipeline.infrastructure.csv.local_csv_failure_detector import (
     LocalCsvFailureDetector,
+)
+from self_healing_pipeline.infrastructure.csv.mixed_delimiter_row_repair_executor import (
+    MixedDelimiterCsvRepairExecutor,
 )
 from self_healing_pipeline.infrastructure.csv.pandas_csv_repair_executor import (
     PandasCsvRepairExecutor,
@@ -142,6 +146,7 @@ _FAILURE_CLASS_TO_ERROR: dict[FailureClass, type[CsvRepairError]] = {
     FailureClass.HEADER_DETECTION: HeaderDetectionError,
     FailureClass.ENGINE_SELECTION: EngineSelectionError,
     FailureClass.SINGLE_COLUMN_MALFORMATION: SingleColumnMalformationError,
+    FailureClass.MIXED_DELIMITER: MixedDelimiterError,
 }
 
 
@@ -154,6 +159,7 @@ def build_error_router(
     run_tracker: RepairRunTracker | None = None,
     trace_tracer: RepairTraceTracer | None = None,
     approval_port: CsvHumanApprovalPort | None = None,
+    mixed_delimiter_executor: CsvRepairExecutor | None = None,
 ) -> ErrorRouter:
     """Wire the real Tier 1 pipeline from injected ports.
 
@@ -162,10 +168,17 @@ def build_error_router(
     with fakes in tests. `approval_port` is only ever consulted for a
     genuine multi-failure repair (see `csv_repair_workflow`'s
     `human_approval` node) — omitting it reproduces prior,
-    single-failure-only behavior exactly.
+    single-failure-only behavior exactly. `mixed_delimiter_executor` is
+    the separate `CsvRepairExecutor` used only for `MIXED_DELIMITER`
+    prescriptions (see `build_csv_repair_workflow`) — omitting it
+    reproduces prior behavior exactly for every other failure class.
     """
     graph = build_csv_repair_workflow(
-        detector=detector, executor=executor, llm_port=llm_port, approval_port=approval_port
+        detector=detector,
+        executor=executor,
+        llm_port=llm_port,
+        approval_port=approval_port,
+        mixed_delimiter_executor=mixed_delimiter_executor,
     )
     agent = LangGraphCsvRepairAgent(
         graph, audit_store=audit_store, run_tracker=run_tracker, trace_tracer=trace_tracer
@@ -194,6 +207,7 @@ def build_production_error_router() -> ErrorRouter:
         detector=LocalCsvFailureDetector(),
         executor=PandasCsvRepairExecutor(),
         llm_port=build_proposal_provider(),
+        mixed_delimiter_executor=MixedDelimiterCsvRepairExecutor(),
         audit_store=PostgresRepairAuditStore.from_settings(settings.database),
         run_tracker=MlflowRepairRunTracker.from_settings(settings.mlflow),
         trace_tracer=MlflowRepairTraceTracer(),
@@ -328,6 +342,8 @@ def schema_repair(table: str, file_path: str, episode_id_option: str | None) -> 
     click.echo(f"human_approved: {result.human_approved}")
     if result.prescription is not None:
         click.echo(f"prescription: {result.prescription.model_dump_json()}")
+    if result.output_path is not None:
+        click.echo(f"output_path: {result.output_path}")
     click.echo(f"message: {result.message}")
 
     if result.status.value not in ("succeeded", "healthy"):
