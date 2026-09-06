@@ -1,4 +1,4 @@
-id,name,age,country,phone,email
+id,candidate_name,age,country,phone,email
 1,Alice,30,USA,555-0101,alice@example.com
 2,Bob,25,Canada,555-0102,bob@example.com
 3,Charlie,35,UK,555-0103,charlie@example.com
@@ -9,3 +9,6 @@ id,name,age,country,phone,email
 8,Hannah,31,Ireland,555-0108,hannah@example.com
 9,Ian,26,Spain,555-0109,ian@example.com
 10,Julia,37,Italy,555-0110,julia@example.com
+1,Alice,30,USA,555-0101,alice@example.com
+2,Bob,25,Canada,555-0102,bob@example.com
+3,Charlie,35,UK,555-0103,charlie@example.com

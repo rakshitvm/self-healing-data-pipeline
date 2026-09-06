@@ -3,22 +3,27 @@
     detect -> diff -> rename_resolution_subgraph -> propose -> validate
     -> confidence_gate -> human_approval -> apply -> verify
 
-A LangGraph `StateGraph`, architecturally parallel to (and independent
-of) Tier 1's `csv_repair_workflow` — a separate agent/workflow, not a
-CSV repair variant. `rename_resolution_subgraph` is a genuinely nested,
-independently-compiled `StateGraph` invoked as a single node (see that
-module) — not an ordinary function call.
+    detect -> propose_header_assignment -> validate -> ... (same tail)
 
-Human-in-the-loop is architectural, not optional: `human_approval` runs
-for *every* prescription regardless of confidence (a lead requirement —
-confidence only ever adds an `escalated` flag for extra visibility, it
-never bypasses the human gate, and it never allows auto-apply). Nothing
-downstream of `human_approval` runs unless a human explicitly approved.
+A LangGraph `StateGraph`, parallel to (and independent of) Tier 1's
+`csv_repair_workflow` — a separate agent/workflow, not a CSV repair
+variant. `rename_resolution_subgraph` is a nested, independently
+compiled `StateGraph` invoked as a single node.
 
-No retry loop: unlike CSV repair, a human decision is terminal for this
-invocation. Cross-invocation continuity (loading prior history, not
-re-proposing an already-rejected operation within the same episode) is
-handled by `detect` loading `episode_id`'s prior migration history.
+`propose_header_assignment` is a second entry point from `detect`: when
+the data has no real header but its column count and value types
+positionally match a baseline (see `looks_headerless`), that's handled
+deterministically here (no LLM, no `diff`/`resolve_renames`), then
+rejoins the same `validate -> confidence_gate -> human_approval -> apply
+-> verify` tail. A file with a real header is unaffected.
+
+Human-in-the-loop is architectural: `human_approval` runs for every
+prescription regardless of confidence — confidence only adds an
+`escalated` flag, it never bypasses the human gate or allows auto-apply.
+
+No retry loop: a human decision is terminal for this invocation.
+Cross-invocation continuity is handled by `detect` loading
+`episode_id`'s prior migration history.
 """
 
 from typing import Any, TypedDict
@@ -31,7 +36,10 @@ from self_healing_pipeline.application.orchestration.rename_resolution_subgraph 
     build_initial_rename_resolution_state,
     build_rename_resolution_subgraph,
 )
-from self_healing_pipeline.application.orchestration.schema_diff import compute_column_diff
+from self_healing_pipeline.application.orchestration.schema_diff import (
+    compute_column_diff,
+    looks_headerless,
+)
 from self_healing_pipeline.domain.entities.schema_definition import ColumnDefinition, SchemaBaseline
 from self_healing_pipeline.domain.interfaces.repositories.schema_migration_history_store import (
     SchemaMigrationHistoryStore,
@@ -181,7 +189,46 @@ def _make_detect_node(
 
 
 def _route_after_detect(state: SchemaRepairWorkflowState) -> str:
-    return "diff" if state["baseline"] is not None else "no_baseline"
+    baseline = state["baseline"]
+    if baseline is None:
+        return "no_baseline"
+    candidate_names = tuple(column.name for column in state["current_schema"])
+    if looks_headerless(candidate_names, baseline):
+        return "assign_header"
+    return "diff"
+
+
+def _make_propose_header_assignment_node() -> Any:
+    def propose_header_assignment(state: SchemaRepairWorkflowState) -> dict[str, Any]:
+        logger = get_logger(
+            agent="SchemaRepairAgent", node="propose_header_assignment", table=state["table"]
+        )
+        baseline = state["baseline"]
+        assert baseline is not None  # guaranteed by _route_after_detect
+
+        operations = [
+            SchemaRepairOperation(
+                op=OperationType.ASSIGN_HEADER,
+                column=str(index),
+                target_column=column.name,
+            )
+            for index, column in enumerate(baseline.columns)
+        ]
+        # Every baseline column is, from a naive header=0 view, currently
+        # "missing" — an honest, minimal ColumnDiff for human approval's
+        # display; `diff`/`resolve_renames`/the LLM are never involved on
+        # this deterministic path.
+        diff = ColumnDiff(removed=baseline.columns)
+
+        logger.info(
+            "node_completed",
+            operation_count=len(operations),
+            target_columns=[column.name for column in baseline.columns],
+        )
+
+        return {"raw_operations": operations, "confidence": 1.0, "diff": diff}
+
+    return propose_header_assignment
 
 
 def _diff(state: SchemaRepairWorkflowState) -> dict[str, Any]:
@@ -449,6 +496,7 @@ def build_schema_repair_workflow(
     graph.add_node("diff", _diff)
     graph.add_node("resolve_renames", _make_rename_resolution_node(confirmation_port))
     graph.add_node("propose", _make_propose_node())
+    graph.add_node("propose_header_assignment", _make_propose_header_assignment_node())
     graph.add_node("validate", _validate)
     graph.add_node("confidence_gate", _make_confidence_gate_node(confidence_threshold))
     graph.add_node("human_approval", _make_human_approval_node(approval_port))
@@ -463,13 +511,20 @@ def build_schema_repair_workflow(
 
     graph.add_edge(START, "detect")
     graph.add_conditional_edges(
-        "detect", _route_after_detect, {"diff": "diff", "no_baseline": "no_baseline"}
+        "detect",
+        _route_after_detect,
+        {
+            "diff": "diff",
+            "no_baseline": "no_baseline",
+            "assign_header": "propose_header_assignment",
+        },
     )
     graph.add_conditional_edges(
         "diff", _route_after_diff, {"resolve_renames": "resolve_renames", "healthy": "healthy"}
     )
     graph.add_edge("resolve_renames", "propose")
     graph.add_edge("propose", "validate")
+    graph.add_edge("propose_header_assignment", "validate")
     graph.add_conditional_edges(
         "validate", _route_after_validation, {"confidence_gate": "confidence_gate", "invalid": "invalid"}
     )

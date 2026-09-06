@@ -688,3 +688,94 @@ def test_prior_history_is_loaded_on_retry(tmp_path: Path) -> None:
     )
 
     assert len(final_state["rejected_operation_keys"]) == 1
+
+
+# --- headerless-file baseline mapping ---------------------------------------
+
+
+class _ExplodingConfirmationPort:
+    """Fake `RenameConfirmationPort` that fails the test if ever called —
+    the headerless path is fully deterministic and must never involve
+    the LLM/rename-resolution subgraph at all."""
+
+    def confirm(self, *, table: str, hint: RenameHint) -> RenameConfirmation:
+        raise AssertionError("the headerless path must never call the LLM")
+
+
+def test_headerless_file_is_detected_and_repaired_without_data_loss(tmp_path: Path) -> None:
+    """A genuinely headerless file, positionally matching the baseline
+    exactly: detected, human approval receives the proposed mapping,
+    applied, verified — and critically, the row a naive read would have
+    swallowed as a fake header is present in the output as real data,
+    not lost."""
+    file_path = _write_csv(tmp_path, "headerless.csv", "1,Alice,30\n2,Bob,25\n3,Charlie,35\n")
+    approval_port = _RecordingApprovalPort(approved=True)
+    graph = build_schema_repair_workflow(
+        baseline_store=_FakeBaselineStore(BASELINE),
+        inspector=PandasSchemaInspector(),
+        history_store=_InMemoryHistoryStore(),
+        confirmation_port=_ExplodingConfirmationPort(),
+        approval_port=approval_port,
+        executor=PandasSchemaExecutor(),
+    )
+
+    final_state = graph.invoke(
+        build_initial_schema_repair_state(episode_id=uuid4(), table="customers", file_path=file_path)
+    )
+
+    assert final_state["status"] is SchemaRepairStatus.SUCCEEDED
+    assert len(approval_port.requests) == 1
+    assert approval_port.requests[0].diff is not None
+    assert final_state["validated_operations"] is not None
+    assert len(final_state["validated_operations"]) == 3
+    assert all(op.op is OperationType.ASSIGN_HEADER for op in final_state["validated_operations"])
+
+    import pandas as pd
+
+    assert Path(file_path).read_text(encoding="utf-8") == "1,Alice,30\n2,Bob,25\n3,Charlie,35\n"
+
+    assert final_state["output_path"] is not None
+    frame = pd.read_csv(final_state["output_path"])
+    assert list(frame.columns) == ["id", "name", "age"]
+    assert len(frame) == 3  # row "1,Alice,30" preserved as real data, not swallowed
+    assert frame.iloc[0]["name"] == "Alice"
+
+
+def test_headerless_rejection_leaves_source_untouched(tmp_path: Path) -> None:
+    original = "1,Alice,30\n2,Bob,25\n"
+    file_path = _write_csv(tmp_path, "headerless.csv", original)
+    graph = build_schema_repair_workflow(
+        baseline_store=_FakeBaselineStore(BASELINE),
+        inspector=PandasSchemaInspector(),
+        history_store=_InMemoryHistoryStore(),
+        confirmation_port=_ExplodingConfirmationPort(),
+        approval_port=_RecordingApprovalPort(approved=False),
+        executor=PandasSchemaExecutor(),
+    )
+
+    final_state = graph.invoke(
+        build_initial_schema_repair_state(episode_id=uuid4(), table="customers", file_path=file_path)
+    )
+
+    assert final_state["status"] is SchemaRepairStatus.REJECTED
+    assert Path(file_path).read_text(encoding="utf-8") == original
+
+
+def test_a_real_header_is_never_misdetected_as_headerless(tmp_path: Path) -> None:
+    """Regression/false-positive guard: a normal, already-headered file
+    must be completely unaffected by this new capability."""
+    file_path = _write_csv(tmp_path, "customers.csv", "id,name,age\n1,Alice,30\n2,Bob,25\n")
+    graph = build_schema_repair_workflow(
+        baseline_store=_FakeBaselineStore(BASELINE),
+        inspector=PandasSchemaInspector(),
+        history_store=_InMemoryHistoryStore(),
+        confirmation_port=_ExplodingConfirmationPort(),
+        approval_port=_RecordingApprovalPort(approved=True),
+        executor=PandasSchemaExecutor(),
+    )
+
+    final_state = graph.invoke(
+        build_initial_schema_repair_state(episode_id=uuid4(), table="customers", file_path=file_path)
+    )
+
+    assert final_state["status"] is SchemaRepairStatus.HEALTHY

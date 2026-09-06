@@ -223,3 +223,63 @@ def test_panel_scenario_end_to_end_only_fionas_row_is_repaired(tmp_path: Path) -
 
     # source file itself was never touched
     assert Path(file_path).read_text(encoding="utf-8") == PANEL_CSV
+
+
+# --- garbled HEADER_DETECTION header line (not genuine MIXED_DELIMITER) ----
+
+
+GARBLED_HEADER_CSV = (
+    "VDVSDVSDVSD\n"
+    "SNJSDHSDH\n"
+    "id;name|age,state,country\n"
+    "1,Alice,30,Georgia,USA\n"
+    "2,Bob,25,Georgia,USA\n"
+    "3,Charlie,35,Georgia,USA\n"
+)
+
+# Deliberately wrong on every count the deterministic evidence must
+# override: header_row=0 would (wrongly) treat the first junk line as
+# the header, and the LLM is never even asked for the header line's own
+# per-character delimiter mix.
+WRONG_LLM_PROPOSAL_FOR_GARBLED_HEADER = {
+    "delimiter": ",",
+    "encoding": "utf-8",
+    "header_row": 0,
+    "engine": "python",
+}
+
+
+def test_garbled_header_end_to_end_reproduces_the_live_discovery(tmp_path: Path) -> None:
+    """The exact scenario found live: 2 junk preamble lines, then a
+    header using 3 different delimiters at once. A wrong LLM guess must
+    be corrected on every dimension (header_row, delimiter, and the
+    header line's own rewrite), and the final output must have a real
+    header with every data row intact — none swallowed into fake column
+    names."""
+    file_path = _write(tmp_path, "garbled_header.csv", GARBLED_HEADER_CSV)
+    llm_port = _FakeProposalPort(WRONG_LLM_PROPOSAL_FOR_GARBLED_HEADER)
+    graph = _graph(llm_port, _RecordingApprovalPort(approved=True))
+
+    result = graph.invoke(build_initial_state(file_path, max_retries=0))
+
+    assert result["failure_class"] == FailureClass.HEADER_DETECTION
+    assert result["proposed_params"]["header_row"] == 2
+    assert result["proposed_params"]["delimiter"] == ","
+    assert len(result["proposed_params"]["mixed_delimiter_rows"]) == 1
+    assert result["status"] == RepairEpisodeStatus.SUCCEEDED
+    assert result["verification_result"] is not None
+    assert result["verification_result"].success is True
+
+    repair_result = result["repair_result"]
+    assert repair_result is not None
+    assert repair_result.output_path is not None
+    repaired = Path(repair_result.output_path).read_text(encoding="utf-8")
+    assert repaired == (
+        "id,name,age,state,country\n"
+        "1,Alice,30,Georgia,USA\n"
+        "2,Bob,25,Georgia,USA\n"
+        "3,Charlie,35,Georgia,USA\n"
+    )
+
+    # source file itself was never touched
+    assert Path(file_path).read_text(encoding="utf-8") == GARBLED_HEADER_CSV

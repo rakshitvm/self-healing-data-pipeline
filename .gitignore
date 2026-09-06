@@ -44,9 +44,16 @@ coverage.xml
 *.log
 logs/
 
+# --- Generated audit trail (Tier 2 schema-repair runs) ---
+configs/schema_migrations/
+
+# --- Generated repair output (regenerated on every CLI run) ---
+test_samples/**/repaired/
+
 # --- IDE / editor ---
 .idea/
 .vscode/
+.claude/
 *.swp
 *.swo
 .DS_Store

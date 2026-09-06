@@ -89,7 +89,17 @@ class PandasSchemaExecutor:
         self, file_path: str, operations: tuple[SchemaRepairOperation, ...]
     ) -> SchemaExecutionOutcome:
         try:
-            frame = pd.read_csv(file_path)
+            # ASSIGN_HEADER means the file has no real header row at all —
+            # a plain read would otherwise swallow the first data row as
+            # a fake header (exactly the condition that made this
+            # detectable in the first place, see `looks_headerless`).
+            # Reading with header=None instead recovers it as real data.
+            # Every other operation type is completely unaffected: same
+            # call as before, byte-for-byte.
+            if any(op.op is OperationType.ASSIGN_HEADER for op in operations):
+                frame = pd.read_csv(file_path, header=None)
+            else:
+                frame = pd.read_csv(file_path)
             for operation in operations:
                 frame = _apply_operation(frame, operation)
         except Exception as exc:  # noqa: BLE001 - any failure is a valid, reportable outcome
@@ -135,11 +145,17 @@ class PandasSchemaExecutor:
 
         errors: list[str] = []
         for operation in operations:
-            if operation.op is OperationType.RENAME:
+            if operation.op in (OperationType.RENAME, OperationType.ASSIGN_HEADER):
+                # After a successful repair the file always has a genuine
+                # header now (assigned or renamed), read here with plain
+                # defaults — so `operation.column` (the old name, or the
+                # positional index for ASSIGN_HEADER) correctly no longer
+                # matches anything, and `target_column` correctly does.
+                # Same check serves both operation kinds unmodified.
                 if operation.column in frame.columns:
-                    errors.append(f"rename: {operation.column!r} still present")
+                    errors.append(f"{operation.op.value}: {operation.column!r} still present")
                 if operation.target_column not in frame.columns:
-                    errors.append(f"rename: {operation.target_column!r} missing")
+                    errors.append(f"{operation.op.value}: {operation.target_column!r} missing")
             elif operation.op is OperationType.CAST:
                 if operation.column not in frame.columns:
                     errors.append(f"cast: {operation.column!r} missing")
@@ -173,6 +189,13 @@ class PandasSchemaExecutor:
 def _apply_operation(frame: pd.DataFrame, operation: SchemaRepairOperation) -> pd.DataFrame:
     if operation.op is OperationType.RENAME:
         return frame.rename(columns={operation.column: operation.target_column})
+    if operation.op is OperationType.ASSIGN_HEADER:
+        # `frame` was read with header=None for this operation kind (see
+        # execute()), so its column labels are pandas' own default
+        # integers (0, 1, 2, ...), not strings — operation.column holds
+        # that same index as a string (Pydantic requires str), so it
+        # must be cast back to int to actually match.
+        return frame.rename(columns={int(operation.column): operation.target_column})
     if operation.op is OperationType.CAST:
         target = _PANDAS_CAST_TYPE.get(operation.target_type or "", None)
         if target is None:

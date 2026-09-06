@@ -246,10 +246,15 @@ def test_header_detection_flows_through_full_workflow(tmp_path: Path) -> None:
 
 def test_engine_selection_flows_through_full_workflow(tmp_path: Path) -> None:
     """Real detector + real executor: a row with a missing trailing field
-    (fewer fields than the header, not more) is genuinely repairable —
-    pandas pads the gap with NaN — but only with `engine="python"`/`"c"`,
-    not `"pyarrow"` (verified separately: pyarrow raises `ParserError` on
-    this exact fixture). Matches the proposal a real Groq run produced.
+    (fewer fields than the header, not more) is NOT silently treated as
+    "genuinely repairable" — `PandasCsvRepairExecutor` independently
+    cross-checks every row's raw field count (bypassing pandas' own
+    NaN-padding for a short row), so this correctly fails rather than
+    reporting a false success. This was a real, previously-undetected
+    bug (this test used to assert the opposite): pandas' `c`/`python`
+    engines silently pad a short row with NaN rather than raising, which
+    made this fixture look "successfully repaired" even though row 2's
+    data was actually corrupted, not genuinely fixed.
     """
     file_path = _write(
         tmp_path,
@@ -265,14 +270,13 @@ def test_engine_selection_flows_through_full_workflow(tmp_path: Path) -> None:
         approval_port=_AlwaysApproveCsvHumanApprovalPort(),
     )
 
-    result = graph.invoke(build_initial_state(file_path))
+    result = graph.invoke(build_initial_state(file_path, max_retries=0))
 
     assert result["failure_class"] == FailureClass.ENGINE_SELECTION
-    assert result["status"] == RepairEpisodeStatus.SUCCEEDED
+    assert result["status"] == RepairEpisodeStatus.FAILED
     assert result["repair_result"] is not None
-    assert result["repair_result"].success is True
-    assert result["verification_result"] is not None
-    assert result["verification_result"].success is True
+    assert result["repair_result"].success is False
+    assert any("row 3" in e for e in result["repair_result"].validation_errors)  # "2,beta"
 
 
 def test_valid_csv_repair_params_reaches_apply(tmp_path: Path) -> None:

@@ -1,34 +1,27 @@
 """MLflow tracing setup: autolog registration and bounded flush-on-exit.
 
 Confined to infrastructure. `enable_tracing` turns on MLflow's built-in
-LangChain + OpenAI autologging (empirically verified against MLflow
-3.15.1, Ticket 013) so every LangGraph node becomes a correctly nested
+LangChain + OpenAI autologging so every LangGraph node becomes a nested
 child span, the sample tool gets a TOOL span, and the raw `openai` SDK
-call inside `propose` becomes a CHAT_MODEL span carrying real
-prompt/response/token-usage — all with zero code changes to
+call inside `propose` becomes a CHAT_MODEL span with real
+prompt/response/token-usage — no code changes needed in
 `csv_repair_workflow.py`, `AzureOpenAIProposalProvider`, or
 `GroqProposalProvider`.
 
-Two SEPARATE, empirically-discovered hang risks are mitigated here, not
-just one:
+Two separate hang risks are mitigated here:
 
-1. `mlflow.set_experiment(...)` (called by `enable_tracing` itself) can
-   hang for minutes against an unreachable tracking server. This is NOT
-   just a matter of `MLFLOW_HTTP_REQUEST_TIMEOUT` (default 120s) — MLflow
-   retries failed HTTP calls up to `MLFLOW_HTTP_REQUEST_MAX_RETRIES`
-   times (default 7) with exponential backoff
-   (`MLFLOW_HTTP_REQUEST_BACKOFF_FACTOR`, default 2), so the *cumulative*
-   wait across retries dominates even a short per-request timeout.
-   Verified: with the defaults, this hangs past 20s; with a short timeout
-   AND retries disabled, an unreachable server fails in ~0.01s. Both env
-   vars are set (via `setdefault`, so an operator's own configuration is
-   never overridden) the first time `enable_tracing` runs.
-2. The default atexit trace-flush can *also* hang if the tracking server
-   is unreachable at process-exit time (governed by the same retry
-   settings above, now bounded by mitigation 1 — but `flush_traces`
-   layers on an explicit, independent bound regardless, using a daemon
-   thread with a hard join timeout, so process shutdown is never at the
-   mercy of MLflow's internals even if something else changes upstream).
+1. `mlflow.set_experiment(...)` can hang for minutes against an
+   unreachable tracking server — MLflow retries failed HTTP calls
+   (`MLFLOW_HTTP_REQUEST_MAX_RETRIES`, default 7) with exponential
+   backoff on top of the per-request timeout
+   (`MLFLOW_HTTP_REQUEST_TIMEOUT`, default 120s), so the cumulative wait
+   dominates. Both env vars are set to shorter values via `setdefault`
+   (never overriding an operator's own configuration) the first time
+   `enable_tracing` runs.
+2. The default atexit trace-flush can also hang for the same reason.
+   `flush_traces` adds an independent bound on top — a daemon thread
+   with a hard join timeout — so shutdown isn't at the mercy of MLflow's
+   internals even if something else changes upstream.
 """
 
 import os

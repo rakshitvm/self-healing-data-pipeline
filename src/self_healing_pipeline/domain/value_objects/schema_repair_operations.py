@@ -14,15 +14,26 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class OperationType(str, Enum):
-    """The four Tier 2 schema repair operation kinds."""
+    """The Tier 2 schema repair operation kinds.
+
+    `ASSIGN_HEADER` is a fifth kind, structurally identical to `RENAME`
+    (`column` + `target_column`) but semantically distinct: there is no
+    real column to rename *from* — a header is being attached to a file
+    that doesn't have one at all (`column` holds the positional index,
+    as a string, that pandas assigns when reading with `header=None`).
+    It only ever appears alone in an operation list — never mixed with
+    the other four, which all assume named columns already exist.
+    """
 
     RENAME = "rename"
     CAST = "cast"
     DROP = "drop"
     ADD_DEFAULT = "add_default"
+    ASSIGN_HEADER = "assign_header"
 
 
 _EXECUTION_ORDER: dict[OperationType, int] = {
+    OperationType.ASSIGN_HEADER: -1,
     OperationType.RENAME: 0,
     OperationType.CAST: 1,
     OperationType.DROP: 2,
@@ -49,8 +60,8 @@ class SchemaRepairOperation(BaseModel):
 
     @model_validator(mode="after")
     def _validate_required_fields_for_op(self) -> "SchemaRepairOperation":
-        if self.op is OperationType.RENAME and not self.target_column:
-            raise ValueError("rename operation requires target_column")
+        if self.op in (OperationType.RENAME, OperationType.ASSIGN_HEADER) and not self.target_column:
+            raise ValueError(f"{self.op.value} operation requires target_column")
         if self.op is OperationType.CAST and not self.target_type:
             raise ValueError("cast operation requires target_type")
         if self.op is OperationType.ADD_DEFAULT and not self.target_type:

@@ -68,12 +68,20 @@ services:
   # since this is local-development-only, matching every other service
   # above (no production credentials here either).
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.0
+    # 7.17.0's bundled JDK has a bug in its cgroup v2 parser that crashes
+    # the launcher's *bootstrap* JVM (computing JVM options) before
+    # ES_JAVA_OPTS is even applied — `-XX:-UseContainerSupport` and
+    # `cgroup: host` can't reach that code path. A later 7.17.x patch
+    # bundles a JDK with this fixed; pinned to a specific patch (not
+    # `:7.17` floating) so this stays reproducible. Same minor version as
+    # Kibana below — Elastic guarantees 7.17.x patch-level compatibility.
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.28
     container_name: self-healing-pipeline-elasticsearch
     restart: unless-stopped
+    cgroup: host
     environment:
       discovery.type: single-node
-      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m -XX:-UseContainerSupport"
     ports:
       - "${ELASTICSEARCH_PORT:-9200}:9200"
     volumes:

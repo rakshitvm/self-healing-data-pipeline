@@ -1,14 +1,12 @@
 """Provider-agnostic repair-invocation tracing abstraction.
 
-MLflow's tracing API (traces/spans) is a genuinely different concept
-from `RepairRunTracker`'s Runs API — different ID namespace, different
-lifecycle, different underlying MLflow endpoints (empirically verified,
-Ticket 013). Rather than overloading `RepairRunTracker`'s shape, this is
-a small, separate, generic port: it wraps exactly one callable
-invocation in a best-effort trace, without knowing anything about
-LangGraph, CSV repair, or any application-layer type — kept generic so
-the domain layer stays free of MLflow-specific *or*
-`csv_repair_workflow`-specific concepts.
+MLflow's tracing API (traces/spans) is a different concept from
+`RepairRunTracker`'s Runs API — different ID namespace, different
+lifecycle, different underlying endpoints (Ticket 013). Rather than
+overloading `RepairRunTracker`'s shape, this is a small, separate,
+generic port: it wraps one callable invocation in a best-effort trace,
+without knowing anything about LangGraph, CSV repair, or any
+application-layer type.
 
 Tracing through `RepairTraceTracer` is strictly best-effort: the wrapped
 callable is always invoked exactly once, regardless of whether trace

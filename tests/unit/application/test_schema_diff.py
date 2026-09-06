@@ -7,6 +7,7 @@ comparison, so every assertion here is exact and deterministic.
 from self_healing_pipeline.application.orchestration.schema_diff import (
     compute_column_diff,
     compute_rename_hints,
+    looks_headerless,
 )
 from self_healing_pipeline.domain.entities.schema_definition import ColumnDefinition, SchemaBaseline
 
@@ -91,3 +92,50 @@ def test_rename_hints_are_greedy_one_to_one() -> None:
 def test_unrelated_column_names_produce_no_rename_hint() -> None:
     hints = compute_rename_hints(removed=("customer_name",), added=("zzz_totally_unrelated_xyz",))
     assert hints == ()
+
+
+# --- looks_headerless ------------------------------------------------------
+
+
+def test_looks_headerless_true_for_genuine_headerless_data() -> None:
+    """A real data row, positionally matching the baseline's types
+    exactly, correctly looks headerless."""
+    assert looks_headerless(("1", "Alice", "30"), BASELINE) is True
+
+
+def test_looks_headerless_false_for_a_real_header() -> None:
+    """The false-positive guard: a real header's own labels must never
+    be mistaken for a swallowed data row."""
+    assert looks_headerless(("id", "customer_name", "age"), BASELINE) is False
+
+
+def test_looks_headerless_false_for_column_count_mismatch() -> None:
+    assert looks_headerless(("1", "Alice"), BASELINE) is False
+    assert looks_headerless(("1", "Alice", "30", "extra"), BASELINE) is False
+
+
+def test_looks_headerless_false_when_baseline_is_all_string() -> None:
+    """An all-string baseline is fundamentally undetectable this way — a
+    real header of text labels is indistinguishable from a data row of
+    text values by parseability alone. Always False, regardless of the
+    candidate values, never a guess."""
+    all_string_baseline = SchemaBaseline(
+        table="t",
+        version=1,
+        columns=(
+            ColumnDefinition(name="a", type="string"),
+            ColumnDefinition(name="b", type="string"),
+        ),
+    )
+
+    assert looks_headerless(("1", "2"), all_string_baseline) is False
+    assert looks_headerless(("a", "b"), all_string_baseline) is False
+
+
+def test_looks_headerless_false_when_one_position_fails_to_parse() -> None:
+    """Never a partial/guessed classification — one bad position is
+    enough to refuse the whole classification, same policy as
+    MIXED_DELIMITER's own resolvers."""
+    # position 0 ("abc") does not parse as int64, even though position 2
+    # ("30") does — must not partially match.
+    assert looks_headerless(("abc", "Alice", "30"), BASELINE) is False

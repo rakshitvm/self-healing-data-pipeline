@@ -245,3 +245,101 @@ def test_execute_creates_the_output_directory_if_missing(tmp_path: Path) -> None
 
     assert outcome.success is True
     assert (tmp_path / "repaired").is_dir()
+
+
+# --- header_row-aware (garbled HEADER_DETECTION header line) ----------------
+
+
+def _params_from_garbled_header(file_path: str) -> CsvRepairParams:
+    """Mirrors `_params_from_detector`, but for the garbled-header-line
+    evidence path instead of the genuine-MIXED_DELIMITER one."""
+    detector = LocalCsvFailureDetector()
+    header_row = detector.detect_header_offset_evidence(file_path)
+    result = detector.detect_garbled_header_repair(file_path)
+    assert result is not None
+    delimiter, repair = result
+    return CsvRepairParams(
+        delimiter=delimiter,
+        encoding="utf-8",
+        header_row=header_row,
+        engine=CsvEngine.PYTHON,
+        mixed_delimiter_rows=(repair,),
+    )
+
+
+def test_preamble_lines_are_dropped_and_garbled_header_is_rewritten(tmp_path: Path) -> None:
+    """The live-discovered case, at the executor level: 2 junk preamble
+    lines must be dropped entirely from the output, and the garbled
+    header line rewritten — not promoting the first data row into the
+    column names."""
+    file_path = _write(
+        tmp_path,
+        "garbled_header.csv",
+        "VDVSDVSDVSD\nSNJSDHSDH\nid;name|age,state,country\n"
+        "1,Alice,30,Georgia,USA\n2,Bob,25,Georgia,USA\n3,Charlie,35,Georgia,USA\n",
+    )
+    params = _params_from_garbled_header(file_path)
+    assert params.header_row == 2
+
+    outcome = MixedDelimiterCsvRepairExecutor().execute(file_path, params)
+
+    assert outcome.success is True
+    assert outcome.output_path is not None
+    repaired = Path(outcome.output_path).read_text(encoding="utf-8")
+    assert repaired == (
+        "id,name,age,state,country\n"
+        "1,Alice,30,Georgia,USA\n"
+        "2,Bob,25,Georgia,USA\n"
+        "3,Charlie,35,Georgia,USA\n"
+    )
+
+    verify_outcome = MixedDelimiterCsvRepairExecutor().verify(outcome.output_path, params)
+    assert verify_outcome.success is True
+
+
+def test_genuine_mixed_delimiter_case_is_unaffected_by_header_row_awareness(
+    tmp_path: Path,
+) -> None:
+    """Regression guard: a real MIXED_DELIMITER prescription always has
+    `header_row=0` — confirm the header-row-aware generalization is a
+    strict no-op for it (identical output to the pre-existing
+    `test_only_the_flagged_row_is_repaired_other_rows_preserved`)."""
+    file_path = _write(
+        tmp_path,
+        "panel.csv",
+        "id,name,age\n1,Alice,30\n2,Bob,25\n6;Fiona;33\n7,George,29\n",
+    )
+    params = _params_from_detector(file_path)
+    assert params.header_row == 0
+
+    outcome = MixedDelimiterCsvRepairExecutor().execute(file_path, params)
+
+    assert outcome.success is True
+    assert outcome.output_path is not None
+    repaired = Path(outcome.output_path).read_text(encoding="utf-8")
+    assert repaired == "id,name,age\n1,Alice,30\n2,Bob,25\n6,Fiona,33\n7,George,29\n"
+
+
+def test_header_row_out_of_range_fails_safely(tmp_path: Path) -> None:
+    file_path = _write(tmp_path, "short.csv", "id,name,age\n1,Alice,30\n")
+    params = CsvRepairParams(
+        delimiter=",",
+        encoding="utf-8",
+        header_row=5,
+        engine=CsvEngine.PYTHON,
+        mixed_delimiter_rows=(
+            MixedDelimiterRowRepair(
+                row_number=6,
+                expected_field_count=3,
+                actual_field_count=1,
+                observed_delimiter=";",
+                original_text="x",
+                repaired_text="x,y,z",
+            ),
+        ),
+    )
+
+    outcome = MixedDelimiterCsvRepairExecutor().execute(file_path, params)
+
+    assert outcome.success is False
+    assert outcome.output_path is None

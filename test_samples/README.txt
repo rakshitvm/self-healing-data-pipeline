@@ -19,7 +19,6 @@ TIER 1 (CSV parsing errors)
 tier1_wrong_delimiter.csv              -> wrong_delimiter
 tier1_wrong_encoding.csv               -> wrong_encoding (real latin-1 bytes, not UTF-8)
 tier1_header_detection.csv             -> header_detection (junk title line before the real header)
-tier1_engine_selection.csv             -> engine_selection (one row has an extra field)
 tier1_single_column_malformation.csv   -> single_column_malformation (space-separated, no delimiter)
 
 TIER 2 (schema drift vs. the "customers_nochange" baseline: id, name, age)

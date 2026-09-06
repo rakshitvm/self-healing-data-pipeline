@@ -83,3 +83,19 @@ class MixedDelimiterError(CsvRepairError):
     otherwise comma-delimited file)."""
 
     FAILURE_CLASS = FailureClass.MIXED_DELIMITER
+
+
+class NoHeaderError(CsvRepairError):
+    """Raised when a CSV file has no header row at all — every row is
+    data, and the first row was (or would be) silently misread as a fake
+    header."""
+
+    FAILURE_CLASS = FailureClass.NO_HEADER
+
+
+class InvisibleCharactersError(CsvRepairError):
+    """Raised when a CSV file's header row is contaminated with a UTF-8
+    BOM or a zero-width/invisible Unicode character (e.g. a stray
+    zero-width space prefixed onto a column name)."""
+
+    FAILURE_CLASS = FailureClass.INVISIBLE_CHARACTERS

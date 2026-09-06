@@ -1,72 +1,60 @@
 """Audit-recording wrapper around the Tier 1 CSV repair workflow.
 
-Runs the existing, unmodified `csv_repair_workflow` graph (Ticket 007)
-and, once it has finished, records what happened through a
-`RepairAuditStore`. This is a pure post-processing integration point: no
-node inside the workflow itself calls the audit store, and no routing
-decision is influenced by it. `ErrorRouter` remains responsible for
-routing, the LangGraph workflow remains responsible for orchestration,
-and `CsvRepairAgent` / `CsvRepairExecutor` remain responsible for repair
-behavior — this module only records what already happened.
+Runs the unmodified `csv_repair_workflow` graph (Ticket 007) and, once
+it finishes, records what happened through a `RepairAuditStore`. Pure
+post-processing: no node inside the workflow calls the audit store, and
+no routing decision is influenced by it. `ErrorRouter` handles routing,
+the LangGraph workflow handles orchestration, `CsvRepairAgent` /
+`CsvRepairExecutor` handle repair — this module only records what
+already happened.
 
-A healthy CSV (no `failure_class` detected) never creates an episode:
-there was no repair attempt to audit.
+A healthy CSV (no `failure_class`) never creates an episode.
 
-Limitation: the workflow's state holds only the *latest* proposal/
+Limitation: the workflow's state holds only the latest proposal/
 validation/repair/verification outcome, not a per-retry history, so a
-retried episode is audited by its final attempt's outcome rather than
-one event per retry. Recording a full per-retry trail would require
-either accumulating history inside the graph's state or calling the
-audit store from within individual graph nodes — both are deferred, to
-keep this integration point the smallest one that satisfies "every
-attempt [episode] is audited" without modifying the workflow itself.
+retried episode is audited by its final attempt rather than one event
+per retry. A full per-retry trail would need history accumulated inside
+the graph's state or the audit store called from individual nodes —
+both deferred to keep this the smallest integration point that
+satisfies "every episode is audited" without modifying the workflow.
 
-Ticket 010 adds an optional `run_tracker` (`RepairRunTracker`, e.g. an
-MLflow-backed implementation) purely as observability, layered on top of
-the same post-hoc integration point — no change to the paragraphs above.
-MLflow is never the audit-of-record: `audit_store` (PostgreSQL) remains
+An optional `run_tracker` (`RepairRunTracker`, e.g. MLflow-backed) adds
+observability on top of the same post-hoc point (Ticket 010) — MLflow is
+never the audit-of-record; `audit_store` (PostgreSQL) stays
 authoritative regardless of whether tracking succeeds. Tracking is
-strictly best-effort — every `RepairRunTracker` call is wrapped so a
-tracking failure can never fail, roll back, or invalidate an otherwise
-successful repair; if tracking fails, that failure is instead recorded
-into the audit trail itself (`payload["mlflow_tracking_error"]` on every
-event of the episode), so it is never silently mistaken for success.
-Because the workflow itself is not touched, there is no per-node timing
-available; `latency_ms` measures the *entire* `graph.invoke()` call and
-is attributed identically to every event of the episode, not to a single
-node. `token_usage` is left unpopulated: `AzureOpenAIProposalProvider`
-(Ticket 008) does not expose the LLM response's token usage through the
-fixed `CsvRepairProposalPort.propose() -> dict[str, Any]` contract, and
-per Ticket 010's constraints that provider's request/response behavior
-must not change to obtain it.
+strictly best-effort: every `RepairRunTracker` call is wrapped so a
+tracking failure can't fail, roll back, or invalidate a successful
+repair — a tracking failure is instead recorded into the audit trail
+itself (`payload["mlflow_tracking_error"]`). Because the workflow isn't
+touched, there's no per-node timing; `latency_ms` measures the entire
+`graph.invoke()` call, attributed identically to every event of the
+episode. `token_usage` is left unpopulated: `AzureOpenAIProposalProvider`
+(Ticket 008) doesn't expose token usage through the fixed
+`CsvRepairProposalPort.propose() -> dict[str, Any]` contract, and that
+provider's request/response behavior isn't meant to change to obtain it.
 
-Ticket 013 adds an optional `trace_tracer` (`RepairTraceTracer`, e.g.
-`MlflowRepairTraceTracer`) alongside `run_tracker` — a second, separate
-MLflow concern (traces/spans, not Runs; see `repair_trace_tracer.py` for
-why these are kept as distinct abstractions). When provided, the whole
-`graph.invoke()` call is wrapped in one best-effort MLflow trace via
-`trace_tracer.trace_invocation`, which *guarantees* `graph.invoke` is
-still called exactly once regardless of tracing outcome. Real per-node
-child spans, the TOOL span, and the LLM span come entirely from MLflow's
-own LangChain/OpenAI autologging (enabled once, at the composition root,
-via `enable_tracing` — see `tracing_setup.py`), not from anything in
-this module — this module only opens the outer trace and threads the
-resulting `trace_id` into `payload["mlflow_trace_id"]` on every event,
-mirroring exactly how `mlflow_run_id`/`mlflow_tracking_error` are
-already threaded through. Omitting `trace_tracer` reproduces Ticket
-010's behavior exactly.
+An optional `trace_tracer` (`RepairTraceTracer`, e.g.
+`MlflowRepairTraceTracer`) adds a second, separate MLflow concern
+(traces/spans, not Runs — see `repair_trace_tracer.py`). When provided,
+the whole `graph.invoke()` call is wrapped in one best-effort MLflow
+trace via `trace_tracer.trace_invocation`, which guarantees
+`graph.invoke` is still called exactly once regardless of tracing
+outcome. Per-node child spans, the TOOL span, and the LLM span come from
+MLflow's own LangChain/OpenAI autologging (enabled once at the
+composition root, see `tracing_setup.py`) — this module only opens the
+outer trace and threads `trace_id` into `payload["mlflow_trace_id"]` on
+every event, the same way `mlflow_run_id`/`mlflow_tracking_error` are
+threaded through. Omitting `trace_tracer` is a no-op for everything
+else.
 
-Asymmetry with `run_tracker`, worth being explicit about: `run_tracker`
-is only ever invoked *after* `failure_class` is known (so it is
-genuinely skipped for healthy files), whereas `trace_tracer` must wrap
-`graph.invoke()` itself — diagnosis happens *inside* the graph, so
-there is no way to know in advance whether a given invocation will turn
-out healthy. This is harmless: MLflow's own autologging would trace the
-invocation regardless, with or without this wrapper, and the "zero LLM
-calls on the healthy path" guarantee is unaffected (`propose`, the only
-node that ever calls an LLM, is still never reached). What stays exactly
-the same either way: a healthy file still creates no audit episode, no
-event, and no trace tag.
+Asymmetry with `run_tracker`: it's only invoked after `failure_class` is
+known (genuinely skipped for healthy files), whereas `trace_tracer`
+wraps `graph.invoke()` itself, since diagnosis happens inside the graph
+— there's no way to know in advance whether an invocation will turn out
+healthy. Harmless either way: MLflow's autologging would trace the
+invocation regardless, the "zero LLM calls on the healthy path"
+guarantee is unaffected (`propose` is still never reached), and a
+healthy file still creates no audit episode, event, or trace tag.
 """
 
 import time

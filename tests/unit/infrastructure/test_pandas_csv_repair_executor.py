@@ -335,3 +335,216 @@ def test_execute_then_verify_round_trip_on_real_malformed_data(tmp_path: Path) -
     assert verify_outcome.success is True
     assert Path(file_path).read_bytes() == original_bytes  # still untouched after reverify
     assert Path(apply_outcome.output_path).read_bytes() == after_apply_output_bytes  # verify didn't write
+
+
+# --- row-level field-count verification (pandas silently NaN-pads a ------
+# --- short row rather than raising; independently cross-checked here) ---
+
+
+def test_execute_rejects_a_row_with_genuinely_fewer_fields_than_expected(
+    tmp_path: Path,
+) -> None:
+    """The real bug found manually via test_samples/sampletest.csv: a row
+    collapsed by a wrong delimiter (fewer raw fields than the header)
+    must not be silently NaN-padded and reported as a success."""
+    file_path = _write(
+        tmp_path,
+        "collapsed_row.csv",
+        "id,name,age,country,continent\n"
+        "1,Alice,30,india,asia\n"
+        "6;Fiona;33,india,asia\n"
+        "7,George,29,india,asia\n",
+    )
+    original_bytes = Path(file_path).read_bytes()
+    params = CsvRepairParams(delimiter=",", encoding="utf-8", header_row=0, engine=CsvEngine.C)
+
+    outcome = PandasCsvRepairExecutor().execute(file_path, params)
+
+    assert outcome.success is False
+    assert outcome.output_path is None
+    assert any("row 3" in e for e in outcome.validation_errors)
+    assert Path(file_path).read_bytes() == original_bytes  # source untouched
+    assert not (tmp_path / "repaired").exists()  # nothing written
+
+
+def test_verify_rejects_a_pre_existing_output_with_a_short_row(tmp_path: Path) -> None:
+    """Direct proof that `verify` independently re-checks the *output*
+    file, not just trusting whatever `execute` produced — a hand-written
+    "already repaired" file with a short row must still fail verify."""
+    output_path = _write(
+        tmp_path, "bad_output.csv", "id,name,age\n1,Alice,30\n2,Bob\n"
+    )
+    params = CsvRepairParams(delimiter=",", encoding="utf-8", header_row=0, engine=CsvEngine.C)
+
+    outcome = PandasCsvRepairExecutor().verify(output_path, params)
+
+    assert outcome.success is False
+    assert any("row 3" in e for e in outcome.validation_errors)
+
+
+def test_a_legitimately_empty_trailing_value_is_not_a_false_positive(tmp_path: Path) -> None:
+    """A field that is genuinely present but empty (a real trailing comma)
+    must not be confused with a field that's missing entirely — the
+    fixed check counts raw tokens via csv.reader, so an empty string is
+    still counted as one field, not zero."""
+    file_path = _write(
+        tmp_path, "empty_trailing_field.csv", "id,name,age\n1,Alice,30\n2,Bob,\n"
+    )
+    params = CsvRepairParams(delimiter=",", encoding="utf-8", header_row=0, engine=CsvEngine.PYTHON)
+
+    outcome = PandasCsvRepairExecutor().execute(file_path, params)
+
+    assert outcome.success is True
+    assert outcome.output_path is not None
+
+
+def test_header_row_is_honored_by_the_row_level_check(tmp_path: Path) -> None:
+    """HEADER_DETECTION's own shape: a junk title line before the real
+    header (header_row=1). A short data row *after* the real header must
+    still be caught; the junk line itself must never be mistaken for a
+    data row."""
+    file_path = _write(
+        tmp_path,
+        "header_detection_short_row.csv",
+        "Sales Report - Q3 2026\nid,name,value\n1,alpha,10\n2,beta\n3,gamma,30\n",
+    )
+    params = CsvRepairParams(delimiter=",", encoding="utf-8", header_row=1, engine=CsvEngine.PYTHON)
+
+    outcome = PandasCsvRepairExecutor().execute(file_path, params)
+
+    assert outcome.success is False
+    # row 4 = "2,beta" (junk title=1, real header=2, "1,alpha,10"=3, "2,beta"=4)
+    assert any("row 4" in e for e in outcome.validation_errors)
+
+
+def test_header_row_none_treats_every_line_as_data(tmp_path: Path) -> None:
+    """`header_row=None` (pandas `header=None`, no header row at all) —
+    every line is a data row, including the first."""
+    file_path = _write(tmp_path, "headerless_short_row.csv", "1,alpha,10\n2,beta\n")
+    params = CsvRepairParams(delimiter=",", encoding="utf-8", header_row=None, engine=CsvEngine.PYTHON)
+
+    outcome = PandasCsvRepairExecutor().execute(file_path, params)
+
+    assert outcome.success is False
+    assert any("row 2" in e for e in outcome.validation_errors)  # "2,beta" is line 2
+
+
+def test_surplus_row_still_fails_via_the_pre_existing_pandas_parser_error(
+    tmp_path: Path,
+) -> None:
+    """Regression proof, not new behavior: a row with MORE fields than
+    expected is already caught by pandas' own ParserError (confirmed
+    directly for all three engines) — the new row-level check is a
+    deficit-only addition and must never double-report or change this
+    existing, already-correct failure path."""
+    file_path = _write(
+        tmp_path, "surplus_row.csv", "id,name,value\n1,alpha,10\n2,be,ta,20\n3,gamma,30\n"
+    )
+    params = CsvRepairParams(delimiter=",", encoding="utf-8", header_row=0, engine=CsvEngine.C)
+
+    outcome = PandasCsvRepairExecutor().execute(file_path, params)
+
+    assert outcome.success is False
+    # the ParserError message, not our own "expected N fields" message —
+    # proves pandas' own exception path fired first, ours was never reached
+    assert not any("expected" in e.lower() and "fields, found" in e for e in outcome.validation_errors)
+
+
+def test_sampletest_csv_fixture_now_correctly_fails_instead_of_false_success() -> None:
+    """The actual test_samples/sampletest.csv file, run through the real
+    executor directly (bypassing MIXED_DELIMITER-aware routing, proving
+    this executor's own check in isolation): this is the user-facing bug
+    that prompted this whole fix — manually running this file previously
+    reported `success: True` while silently writing corrupted rows. It
+    must now correctly fail rather than silently pad short rows with
+    NaN. This is a shared, manually-edited fixture (its exact content
+    has drifted more than once during development), so the exact row
+    count isn't asserted — only that at least one genuine mismatch is
+    always caught, never silently accepted."""
+    fixture_path = Path(__file__).resolve().parents[3] / "test_samples" / "sampletest.csv"
+    assert fixture_path.is_file(), f"expected fixture at {fixture_path}"
+    params = CsvRepairParams(delimiter=",", encoding="utf-8", header_row=0, engine=CsvEngine.C)
+
+    outcome = PandasCsvRepairExecutor().execute(str(fixture_path), params)
+
+    assert outcome.success is False
+    assert outcome.output_path is None
+    assert len(outcome.validation_errors) >= 1
+
+
+def test_execute_strips_invisible_characters_from_column_names(tmp_path: Path) -> None:
+    """A UTF-8 BOM plus a zero-width space glued onto the first column
+    name must not survive into the repaired output — unconditional, not
+    gated on any particular failure class."""
+    file_path = _write(
+        tmp_path,
+        "bom_and_zwsp.csv",
+        "﻿​store_id,store_name\nS001,Tesco\nS002,Sainsbury's\n",
+    )
+    params = CsvRepairParams(delimiter=",", encoding="utf-8", header_row=0, engine=CsvEngine.PYTHON)
+
+    outcome = PandasCsvRepairExecutor().execute(file_path, params)
+
+    assert outcome.success is True
+    assert outcome.output_path is not None
+    header_line = Path(outcome.output_path).read_text(encoding="utf-8").splitlines()[0]
+    assert header_line == "store_id,store_name"
+    assert "﻿" not in header_line
+    assert "​" not in header_line
+
+
+def test_no_header_repair_preserves_integer_column_names(tmp_path: Path) -> None:
+    """Invisible-character stripping must never coerce pandas' own
+    default integer column names (a `header_row=None` / NO_HEADER read)
+    into strings — only string column names are ever touched."""
+    file_path = _write(tmp_path, "headerless.csv", "1,Alice,30\n2,Bob,25\n")
+    params = CsvRepairParams(delimiter=",", encoding="utf-8", header_row=None, engine=CsvEngine.PYTHON)
+
+    outcome = PandasCsvRepairExecutor().execute(file_path, params)
+
+    assert outcome.success is True
+    assert outcome.output_path is not None
+    header_line = Path(outcome.output_path).read_text(encoding="utf-8").splitlines()[0]
+    assert header_line == "0,1,2"
+
+
+def test_verify_rejects_output_with_invisible_characters_in_columns(tmp_path: Path) -> None:
+    """Direct proof `verify` independently re-confirms no invisible
+    character remains in the *output* file's own column names, rather
+    than trusting that `execute`'s in-memory strip actually took. Uses a
+    zero-width space rather than a BOM: pandas' own `read_csv` already
+    strips a real UTF-8 BOM automatically on the plain default read
+    `verify` uses, so a BOM alone could never actually reach this check
+    — a zero-width space is not auto-stripped and does."""
+    output_path = _write(
+        tmp_path, "contaminated_output.csv", "​id,name\n1,Alice\n2,Bob\n"
+    )
+    params = CsvRepairParams(delimiter=",", encoding="utf-8", header_row=0, engine=CsvEngine.PYTHON)
+
+    outcome = PandasCsvRepairExecutor().verify(output_path, params)
+
+    assert outcome.success is False
+    assert any("invisible" in e.lower() for e in outcome.validation_errors)
+
+
+def test_execute_respects_the_prescribed_encoding_for_the_row_level_check(
+    tmp_path: Path,
+) -> None:
+    """The independent raw-line field-count check must decode the source
+    with the *prescribed* encoding, not always UTF-8 — otherwise a
+    genuinely non-UTF-8 file (e.g. a real WRONG_ENCODING repair) gets
+    misread as corrupted by this defense-in-depth check and a correct
+    repair is falsely rejected. Regression test for the real bug found
+    against the CSV test kit's UTF-16 fixture."""
+    file_path = tmp_path / "latin1.csv"
+    file_path.write_bytes(
+        "id,name,value\n1,café,10\n2,naïve,20\n3,façade,30\n".encode("latin-1")
+    )
+    params = CsvRepairParams(
+        delimiter=",", encoding="latin-1", header_row=0, engine=CsvEngine.PYTHON
+    )
+
+    outcome = PandasCsvRepairExecutor().execute(str(file_path), params)
+
+    assert outcome.success is True
+    assert outcome.output_path is not None

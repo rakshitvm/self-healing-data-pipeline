@@ -53,7 +53,9 @@ from self_healing_pipeline.domain.exceptions.csv_errors import (
     CsvRepairError,
     EngineSelectionError,
     HeaderDetectionError,
+    InvisibleCharactersError,
     MixedDelimiterError,
+    NoHeaderError,
     SingleColumnMalformationError,
     WrongDelimiterError,
     WrongEncodingError,
@@ -147,6 +149,8 @@ _FAILURE_CLASS_TO_ERROR: dict[FailureClass, type[CsvRepairError]] = {
     FailureClass.ENGINE_SELECTION: EngineSelectionError,
     FailureClass.SINGLE_COLUMN_MALFORMATION: SingleColumnMalformationError,
     FailureClass.MIXED_DELIMITER: MixedDelimiterError,
+    FailureClass.NO_HEADER: NoHeaderError,
+    FailureClass.INVISIBLE_CHARACTERS: InvisibleCharactersError,
 }
 
 
@@ -163,15 +167,11 @@ def build_error_router(
 ) -> ErrorRouter:
     """Wire the real Tier 1 pipeline from injected ports.
 
-    Pure dependency injection — no settings are read and no infrastructure
-    is constructed here, which is exactly what makes this function usable
-    with fakes in tests. `approval_port` is only ever consulted for a
-    genuine multi-failure repair (see `csv_repair_workflow`'s
-    `human_approval` node) — omitting it reproduces prior,
-    single-failure-only behavior exactly. `mixed_delimiter_executor` is
-    the separate `CsvRepairExecutor` used only for `MIXED_DELIMITER`
-    prescriptions (see `build_csv_repair_workflow`) — omitting it
-    reproduces prior behavior exactly for every other failure class.
+    Pure dependency injection — no settings read, no infrastructure
+    constructed, so this is usable with fakes in tests. `mixed_delimiter_executor`
+    is the separate `CsvRepairExecutor` used only for `MIXED_DELIMITER`
+    prescriptions (see `build_csv_repair_workflow`); omitting it is a
+    no-op for every other failure class.
     """
     graph = build_csv_repair_workflow(
         detector=detector,
@@ -250,10 +250,10 @@ def repair(file_path: str) -> None:
     try:
         result = router.route(error)
     finally:
-        # Bounded, best-effort: mitigates an empirically-verified risk
-        # (Ticket 013) where MLflow's default trace flush can hang the
-        # process for a long time if the tracking server is unreachable.
-        # The repair result above is already computed and unaffected.
+        # Bounded, best-effort: mitigates a risk (Ticket 013) where
+        # MLflow's default trace flush can hang the process for a long
+        # time if the tracking server is unreachable. The repair result
+        # above is already computed and unaffected.
         flush_traces()
 
     click.echo(f"failure_class: {failure_class.value}")
@@ -266,6 +266,10 @@ def repair(file_path: str) -> None:
     if result.prescription is not None:
         click.echo(f"prescription: {result.prescription.model_dump_json()}")
     click.echo(f"message: {result.message}")
+    if result.validation_errors:
+        click.echo("validation_errors:")
+        for validation_error in result.validation_errors:
+            click.echo(f"  - {validation_error}")
 
     if not result.success:
         sys.exit(1)
@@ -393,17 +397,12 @@ def _build_cloud_integration_service() -> tuple[CloudIntegrationService, list[st
 
 
 def _build_production_schema_repair_agent() -> LangGraphSchemaRepairAgent:
-    """Best-effort construction of the Tier 2 `RepairAgent`, reusing
-    exactly the same wiring `schema-repair` already uses — baseline
-    store, inspector, history store, confirmation/approval ports,
-    executor — none of it duplicated or reimplemented here.
+    """Build the Tier 2 `RepairAgent`, reusing the same wiring
+    `schema-repair` uses — baseline store, inspector, history store,
+    confirmation/approval ports, executor.
 
-    Called only from `repair_and_process`, and only when a `--table` was
-    actually supplied and a Tier 2 check is about to be routed: `repair`
-    and `schema-repair` never call this, and `repair_and_process` never
-    calls it for the "no table" or "Tier 1 failure found" cases either,
-    so no extra infrastructure (e.g. the Postgres migration-history
-    mirror) is ever touched unless a Tier 2 check is genuinely happening.
+    Called only from `repair_and_process`, only when `--table` was
+    supplied and a Tier 2 check is about to run.
     """
     history_store = _build_production_migration_history_store()
     graph = build_schema_repair_workflow(
@@ -429,7 +428,7 @@ def _run_cloud_integration_step(local_file_path: str) -> None:
     exit-code contract is identical regardless of which case got here.
     """
     click.echo("")
-    click.echo("--- cloud integration (optional) ---")
+    click.echo("--- cloud integration ---")
     service, notes = _build_cloud_integration_service()
     for note in notes:
         click.echo(note)
@@ -465,37 +464,23 @@ def _run_cloud_integration_step(local_file_path: str) -> None:
     ),
 )
 def repair_and_process(file_path: str, table: str | None) -> None:
-    """Run the existing Tier 1 `repair` pipeline (or, if `--table` is
-    given and no Tier 1 parse failure is found, the existing Tier 2
-    `schema-repair` workflow) then — provided that check did not fail or
-    get rejected — upload the resulting file (repaired, or the original
-    if it was already healthy) to Azure Blob Storage and trigger a
-    downstream Databricks job.
+    """Run the Tier 1 `repair` pipeline (or, if `--table` is given and no
+    Tier 1 parse failure is found, the Tier 2 `schema-repair` workflow),
+    then — provided that check didn't fail or get rejected — upload the
+    resulting file to Azure Blob Storage and trigger a Databricks job.
 
-    This command duplicates no repair logic from either tier: Tier 1
-    detection/repair is exactly `LocalCsvFailureDetector` and
-    `build_production_error_router()`'s existing `CsvRepairError` ->
-    `LangGraphCsvRepairAgent` wiring, unchanged. Tier 2 detection/repair
-    is exactly the existing `JsonSchemaBaselineStore` /
-    `PandasSchemaInspector` / `compute_column_diff` /
-    `schema_repair_workflow` (including its rename-resolution subgraph,
-    confidence gating, and human approval), reached via the SAME
-    `ErrorRouter`, dispatching on a new `SchemaDriftError` type — no
-    hardcoded if/elif chain decides *which kind* of schema drift
-    occurred; that is entirely the existing workflow's own job.
+    Both tiers reach the same `ErrorRouter`: Tier 1 via `CsvRepairError`
+    -> `LangGraphCsvRepairAgent`, Tier 2 via `SchemaDriftError`, routing
+    to whichever detection/repair pipeline already handles that error
+    type. A Tier 1 parse failure is always handled first, regardless of
+    `--table` — a file that doesn't parse isn't diffed against a schema
+    baseline.
 
-    Tier 1 priority: a Tier 1 parse failure (if any) is always handled
-    first, regardless of whether `--table` was given — a file that does
-    not even parse correctly is not diffed against a schema baseline.
-
-    Cloud step scope: a healthy file (no Tier 1 failure, and either no
-    `--table` was given or Tier 2 found no drift) uploads the *original*
-    `file_path` — nothing was repaired, so there is nothing else to
-    upload. A genuinely repaired file uploads `result.output_path`
-    exactly as before. `result.success is False` (rejected, escalated-
-    then-rejected, or failed) always stops before any cloud call, exit
-    code 1. Exit code 2 means the check/repair itself succeeded but the
-    (optionally configured) cloud step failed.
+    A healthy file (no Tier 1 failure, and no drift or no `--table`)
+    uploads the original `file_path`. A repaired file uploads
+    `result.output_path`. `result.success is False` always stops before
+    any cloud call (exit code 1). Exit code 2 means the repair succeeded
+    but the cloud step failed.
     """
     detector = LocalCsvFailureDetector()
     failure_class = detector.detect(file_path)
@@ -546,6 +531,10 @@ def repair_and_process(file_path: str, table: str | None) -> None:
     if result.prescription is not None:
         click.echo(f"prescription: {result.prescription.model_dump_json()}")
     click.echo(f"message: {result.message}")
+    if result.validation_errors:
+        click.echo("validation_errors:")
+        for validation_error in result.validation_errors:
+            click.echo(f"  - {validation_error}")
 
     if not result.success:
         click.echo("")

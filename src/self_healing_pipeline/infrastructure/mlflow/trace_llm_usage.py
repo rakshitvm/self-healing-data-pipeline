@@ -1,18 +1,17 @@
 """Run-level LLM token/cost aggregation from an already-recorded trace.
 
-Confirmed empirically (not assumed) against real Groq calls in both Tier
-1 and Tier 2: `mlflow.openai.autolog()` — already enabled globally by
-`enable_tracing`, with zero code in this module — automatically attaches
-real `mlflow.chat.tokenUsage` (prompt/completion/total tokens, from the
-SDK response's own `usage` object) and, when MLflow has pricing data for
-the model, `mlflow.llm.cost` to every CHAT_MODEL span it instruments,
-for any raw `openai.OpenAI`/`AzureOpenAI` client call — which is exactly
-what `GroqProposalProvider`, `AzureOpenAIProposalProvider`,
+`mlflow.openai.autolog()` — enabled globally by `enable_tracing`, no
+code needed in this module — attaches `mlflow.chat.tokenUsage`
+(prompt/completion/total tokens, from the SDK response's own `usage`
+object) and, when MLflow has pricing data for the model,
+`mlflow.llm.cost` to every CHAT_MODEL span it instruments, for any raw
+`openai.OpenAI`/`AzureOpenAI` client call — which is what
+`GroqProposalProvider`, `AzureOpenAIProposalProvider`,
 `GroqRenameConfirmationProvider`, and `AzureRenameConfirmationProvider`
-all use internally. This module does not compute, estimate, or invent
-any token count or price — it only reads and sums values MLflow itself
-already captured, so a caller can log one run-level rollup instead of
-only ever having per-span numbers. If a model has no MLflow pricing
+use internally. This module doesn't compute, estimate, or invent any
+token count or price — it only reads and sums values MLflow already
+captured, so a caller can log one run-level rollup instead of only
+per-span numbers. If a model has no MLflow pricing
 entry, `total_cost_usd` is simply omitted — never fabricated.
 """
 

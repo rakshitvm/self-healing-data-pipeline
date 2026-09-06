@@ -1,22 +1,28 @@
-"""Row-level CSV repair execution for MIXED_DELIMITER.
+"""Row-level CSV repair execution for MIXED_DELIMITER, and for a
+HEADER_DETECTION header line malformed the same way.
 
 The only place allowed to apply a `mixed_delimiter_rows` prescription.
-Unlike `PandasCsvRepairExecutor`, this never reads the whole file with
-one global pandas delimiter — it processes the file line by line with
-the stdlib `csv` module, substitutes only the specific rows flagged in
-`params.mixed_delimiter_rows` with their precomputed, already-approved
-`repaired_text`, and leaves every other row exactly as it was (preserved
-verbatim, not rewritten). Never touches the source file; writes a
-separate repaired output, mirroring `PandasCsvRepairExecutor`'s own
-never-modify-the-source contract exactly.
+Unlike `PandasCsvRepairExecutor`, this processes the file line by line
+with the stdlib `csv` module rather than one global pandas read —
+substitutes the rows flagged in `params.mixed_delimiter_rows` with their
+precomputed `repaired_text`, and leaves every other row verbatim. Never
+touches the source file; writes a separate repaired output.
 
-Row numbering contract: `row_number` (both here and on
-`MixedDelimiterRowRepair`) means "the Nth non-blank line," matching
-`LocalCsvFailureDetector`'s own `lines = [... if line.strip()]`
-filtering exactly — blank lines are skipped when numbering, on both the
-detection and execution sides, so a repair always lands on the row it
-was actually computed for even when the file contains blank lines
-earlier in it.
+Row numbering: `row_number` (here and on `MixedDelimiterRowRepair`)
+means "the Nth non-blank line," matching `LocalCsvFailureDetector`'s own
+blank-line filtering, so a repair lands on the row it was computed for.
+
+`params.header_row` (leading lines to drop as preamble, pandas' `header=N`
+semantics) is honored in `execute()`. A genuine MIXED_DELIMITER
+prescription always has `header_row=0` (it never co-occurs with
+HEADER_DETECTION), so this is a no-op there. A HEADER_DETECTION
+prescription whose header line itself needed rewriting (see
+`LocalCsvFailureDetector.detect_garbled_header_repair`) gives
+`header_row` a value greater than 0 and puts a repair at
+`row_number == header_row + 1` instead of a data row; `execute()` uses
+that repaired line to establish `expected_field_count`. `verify()` needs
+no change — it always re-reads the output with plain defaults, which is
+already correct once the preamble is dropped and the header rewritten.
 """
 
 import csv
@@ -107,12 +113,36 @@ class MixedDelimiterCsvRepairExecutor:
                 message=f"{file_path!r} is empty; nothing to repair.",
             )
 
+        # `header_row` is the number of leading lines to treat as
+        # preamble and drop from the output (pandas' `header=N`
+        # semantics) — `None` and `0` both mean "no preamble." A genuine
+        # MIXED_DELIMITER prescription is always `0`; a HEADER_DETECTION
+        # prescription whose header line itself needed rewriting (see
+        # `LocalCsvFailureDetector.detect_garbled_header_repair`) is what
+        # gives this a value > 0.
+        header_row = params.header_row if params.header_row is not None else 0
+        if header_row >= len(lines):
+            return CsvExecutionOutcome(
+                success=False,
+                validation_errors=["header_row_out_of_range"],
+                message=(
+                    f"{file_path!r} has {len(lines)} non-blank line(s), but "
+                    f"header_row={header_row} would skip all of them."
+                ),
+            )
+
         repairs_by_row = {r.row_number: r.repaired_text for r in params.mixed_delimiter_rows}
-        expected_field_count = _field_count(lines[0], params.delimiter)
+        header_line_number = header_row + 1  # 1-based
+        header_text = repairs_by_row.get(header_line_number, lines[header_row])
+        expected_field_count = _field_count(header_text, params.delimiter)
 
         repaired_lines: list[str] = []
         errors: list[str] = []
         for row_number, raw_line in enumerate(lines, start=1):
+            if row_number <= header_row:
+                # Genuine preamble, dropped entirely from the output —
+                # never validated against the header's width.
+                continue
             if row_number in repairs_by_row:
                 # Approved repair, applied verbatim — the exact text a
                 # human already saw at approval, never re-derived here.

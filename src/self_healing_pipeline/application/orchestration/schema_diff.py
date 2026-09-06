@@ -8,12 +8,78 @@ downstream node (including the LLM rename-confirmation step) only ever
 *confirms or refines* what this function already established.
 """
 
+from datetime import datetime
 from difflib import SequenceMatcher
 
 from self_healing_pipeline.domain.entities.schema_definition import ColumnDefinition, SchemaBaseline
 from self_healing_pipeline.domain.value_objects.column_diff import ColumnDiff, RenameHint, TypeChange
 
 _RENAME_HINT_FLOOR = 0.4
+
+
+def _parses_as(value: str, logical_type: str) -> bool:
+    """Does `value` (a raw string) plausibly hold data of `logical_type`?
+
+    Deliberately conservative — used only to decide whether a "column
+    name" might actually be a swallowed data value (see
+    `looks_headerless`), so a false positive here is much worse than a
+    false negative. `"string"` always matches (a real header label is
+    itself a string), which is exactly why an all-string baseline can
+    never be distinguished this way (see `looks_headerless`).
+    """
+    if logical_type == "string":
+        return True
+    if logical_type == "int64":
+        try:
+            int(value)
+            return True
+        except ValueError:
+            return False
+    if logical_type == "float64":
+        try:
+            float(value)
+            return True
+        except ValueError:
+            return False
+    if logical_type == "bool":
+        return value.strip().lower() in {"true", "false"}
+    if logical_type == "datetime":
+        try:
+            datetime.fromisoformat(value)
+            return True
+        except ValueError:
+            return False
+    return False  # unrecognized logical type: never a match
+
+
+def looks_headerless(candidate_names: tuple[str, ...], baseline: SchemaBaseline) -> bool:
+    """Does `candidate_names` look like a swallowed *data* row rather than
+    a genuine header — i.e. is `file_path` actually headerless, with
+    every row (including what a naive read treated as the header)
+    already data, positionally matching `baseline`?
+
+    Pure and deterministic — no LLM, no file I/O of its own.
+    `candidate_names` is expected to be `current_schema`'s column
+    *names* from a plain `header=0` read: for a genuinely headerless
+    file, those names ARE the first data row's values (pandas swallowed
+    them as the header), which is exactly what this function examines.
+
+    `False` immediately if the column count doesn't match the baseline
+    exactly, or if the baseline has no non-string column at all (a
+    real header of text labels is indistinguishable from a data row of
+    text values purely by parseability — a hard, honest scope boundary).
+    Otherwise `True` only if *every* position's candidate value cleanly
+    parses as that position's baseline type — any single position
+    failing means unresolved, never a partial/guessed classification.
+    """
+    if len(candidate_names) != len(baseline.columns):
+        return False
+    if not any(column.type != "string" for column in baseline.columns):
+        return False
+    return all(
+        _parses_as(name, column.type)
+        for name, column in zip(candidate_names, baseline.columns, strict=True)
+    )
 
 
 def compute_column_diff(

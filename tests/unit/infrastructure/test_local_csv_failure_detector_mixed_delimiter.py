@@ -11,6 +11,7 @@ writes a real temporary CSV file and runs the actual detector — no
 mocking of file I/O, `csv.Sniffer`, or `csv.reader`.
 """
 
+import csv
 from pathlib import Path
 
 from self_healing_pipeline.domain.value_objects.failure_class import FailureClass
@@ -316,3 +317,189 @@ def test_different_rows_can_use_different_alternate_delimiters(tmp_path: Path) -
 
     assert result == FailureClass.MIXED_DELIMITER
     assert by_row == {3: ";", 5: "|"}
+
+
+# --- single-field sub-split resolution --------------------------------------
+#
+# A row that is otherwise correctly delimited except that ONE field
+# internally uses a different character (a field-count *deficit*, never
+# a surplus) — discovered directly against test_samples/sampletest.csv
+# during manual testing, which exposed this as a real gap in the
+# whole-row-only resolver above.
+
+
+def test_field_collapsed_into_semicolon_joined_values_is_resolved(tmp_path: Path) -> None:
+    """Row 7 of test_samples/sampletest.csv: 'id,name,age' collapsed into
+    one semicolon-joined field, with the rest of the row still comma-
+    delimited normally."""
+    file_path = _write(
+        tmp_path,
+        "collapsed_field.csv",
+        "id,name,age,country,continent\n"
+        "1,Alice,30,india,asia\n"
+        "6;Fiona;33,india,asia\n"
+        "7,George,29,india,asia\n",
+    )
+
+    result = LocalCsvFailureDetector().detect(file_path)
+    _, rows = LocalCsvFailureDetector().detect_mixed_delimiter_evidence(file_path)
+
+    assert result == FailureClass.MIXED_DELIMITER
+    assert len(rows) == 1
+    assert rows[0].row_number == 3
+    assert rows[0].observed_delimiter == ";"
+    assert rows[0].repaired_text == "6,Fiona,33,india,asia"
+
+
+def test_field_with_embedded_pipe_at_end_of_row_is_resolved(tmp_path: Path) -> None:
+    """Row 14 of test_samples/sampletest.csv: the last field is really two
+    pipe-joined values, everything before it correctly comma-delimited."""
+    file_path = _write(
+        tmp_path,
+        "embedded_pipe_end.csv",
+        "id,name,age,country,continent\n"
+        "1,Alice,30,india,asia\n"
+        "1,Alice,30,india|asia\n",
+    )
+
+    result = LocalCsvFailureDetector().detect(file_path)
+    _, rows = LocalCsvFailureDetector().detect_mixed_delimiter_evidence(file_path)
+
+    assert result == FailureClass.MIXED_DELIMITER
+    assert len(rows) == 1
+    assert rows[0].row_number == 3
+    assert rows[0].observed_delimiter == "|"
+    assert rows[0].repaired_text == "1,Alice,30,india,asia"
+
+
+def test_field_with_embedded_pipe_in_the_middle_of_row_is_resolved(tmp_path: Path) -> None:
+    """Row 15 of test_samples/sampletest.csv: a middle field is really two
+    pipe-joined values."""
+    file_path = _write(
+        tmp_path,
+        "embedded_pipe_middle.csv",
+        "id,name,age,country,continent\n"
+        "1,Alice,30,india,asia\n"
+        "5,Ethan,40|india,asia\n",
+    )
+
+    result = LocalCsvFailureDetector().detect(file_path)
+    _, rows = LocalCsvFailureDetector().detect_mixed_delimiter_evidence(file_path)
+
+    assert result == FailureClass.MIXED_DELIMITER
+    assert len(rows) == 1
+    assert rows[0].row_number == 3
+    assert rows[0].observed_delimiter == "|"
+    assert rows[0].repaired_text == "5,Ethan,40,india,asia"
+
+
+def test_row_needing_more_fields_than_any_single_subsplit_can_provide_stays_engine_selection(
+    tmp_path: Path,
+) -> None:
+    """Row 12 of test_samples/sampletest.csv, reproduced directly: four
+    different punctuation characters in one row, needing 3 extra fields
+    overall, but no single (field, candidate) pair adds more than 1.
+    Genuinely unresolvable — must stay ENGINE_SELECTION, not a guess."""
+    file_path = _write(
+        tmp_path,
+        "irresolvable.csv",
+        "id,name,age,country,continent\n"
+        "1,Alice,30,india,asia\n"
+        "1;Alice|30,india:asia\n",
+    )
+
+    result = LocalCsvFailureDetector().detect(file_path)
+    _, rows = LocalCsvFailureDetector().detect_mixed_delimiter_evidence(file_path)
+
+    assert result == FailureClass.ENGINE_SELECTION
+    assert rows == ()
+
+
+def test_two_different_fields_each_independently_closing_the_deficit_is_ambiguous(
+    tmp_path: Path,
+) -> None:
+    """Deficit of 1, but TWO different fields could each independently
+    close it with a different character — must not guess which one is
+    correct, so the row (and file) stays unresolved."""
+    # header has 4 columns; this row has 3 fields under comma, deficit 1.
+    # field 1 ("b;x") splits by ';' into 2 -> would close the deficit.
+    # field 2 ("c|y") splits by '|' into 2 -> would ALSO close the deficit.
+    file_path = _write(
+        tmp_path,
+        "ambiguous_fields.csv",
+        "w,x,y,z\n" "1,ok,ok2,ok3\n" "a,b;x,c|y\n",
+    )
+
+    result = LocalCsvFailureDetector().detect(file_path)
+    _, rows = LocalCsvFailureDetector().detect_mixed_delimiter_evidence(file_path)
+
+    assert result == FailureClass.ENGINE_SELECTION
+    assert rows == ()
+
+
+def test_one_field_with_two_candidate_characters_each_closing_the_deficit_is_ambiguous(
+    tmp_path: Path,
+) -> None:
+    """Deficit of 1, and a SINGLE field contains two different candidate
+    characters, each of which independently produces the right count if
+    used alone — still ambiguous, must not guess between them."""
+    # header has 4 columns; row has 3 fields under comma, deficit 1.
+    # field 1 ("b;c|d") splits by ';' -> ['b','c|d'] (2 fields, closes
+    # deficit) AND splits by '|' -> ['b;c','d'] (2 fields, also closes
+    # deficit) -- two candidates in the same field both "work".
+    file_path = _write(
+        tmp_path,
+        "ambiguous_candidates.csv",
+        "w,x,y,z\n" "1,ok,ok2,ok3\n" "a,b;c|d,e\n",
+    )
+
+    result = LocalCsvFailureDetector().detect(file_path)
+    _, rows = LocalCsvFailureDetector().detect_mixed_delimiter_evidence(file_path)
+
+    assert result == FailureClass.ENGINE_SELECTION
+    assert rows == ()
+
+
+def test_surplus_row_is_never_attempted_via_subsplit(tmp_path: Path) -> None:
+    """Regression: a row with MORE fields than expected (a surplus) must
+    never be routed through single-field sub-split resolution — that
+    tier is deficit-only by design. Mirrors the existing
+    test_more_fields_with_no_resolvable_alternate_delimiter_stays_engine_selection
+    but adds a candidate-delimiter-bearing character to prove the
+    surplus gate itself (not merely absence of candidates) is what
+    blocks it."""
+    file_path = _write(
+        tmp_path,
+        "surplus_with_candidate.csv",
+        "id,name,age\n1,Alice,30\n2,Bob;X,Extra,25\n",
+    )
+
+    assert LocalCsvFailureDetector().detect(file_path) == FailureClass.ENGINE_SELECTION
+
+
+def test_sampletest_csv_fixture_is_handled_sanely_by_the_real_detector(
+    tmp_path: Path,
+) -> None:
+    """The actual test_samples/sampletest.csv file, run through the real
+    detector. This is a shared, manually-edited fixture (its exact
+    content has drifted more than once during this project's
+    development), so this test deliberately does not assert a specific
+    row count or classification — only that the detector handles
+    whatever is currently there sanely: never crashes, and if it
+    reports MIXED_DELIMITER, every resolved row's `repaired_text`
+    genuinely has the header's field count (never a partial/guessed
+    fix). The ambiguous-row-stays-unresolved guarantee itself is
+    covered by the synthetic, stable fixtures above/below, which don't
+    depend on this file's current content."""
+    fixture_path = Path(__file__).resolve().parents[3] / "test_samples" / "sampletest.csv"
+    assert fixture_path.is_file(), f"expected fixture at {fixture_path}"
+
+    result = LocalCsvFailureDetector().detect(str(fixture_path))
+    _, rows = LocalCsvFailureDetector().detect_mixed_delimiter_evidence(str(fixture_path))
+
+    assert result is not None  # the fixture is deliberately never a healthy file
+    if result == FailureClass.MIXED_DELIMITER:
+        assert len(rows) > 0
+        for repair in rows:
+            fields = next(csv.reader([repair.repaired_text]))
+            assert len(fields) == repair.expected_field_count

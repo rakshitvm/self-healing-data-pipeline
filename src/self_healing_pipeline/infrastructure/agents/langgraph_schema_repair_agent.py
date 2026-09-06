@@ -1,36 +1,23 @@
 """LangGraph-backed `RepairAgent` — the Tier 2 schema-drift repair handler.
 
-Thin adapter between `ErrorRouter` (which only knows the `RepairAgent`
-Protocol: `handle(error) -> RepairResult`) and the existing, unmodified
-`schema_repair_workflow` `StateGraph` plus its audited wrapper
-(`run_audited_schema_repair`) — mirroring `LangGraphCsvRepairAgent`'s
-role for Tier 1 exactly. It contains no schema-diff or repair logic of
-its own: `SchemaBaselineStore`, `CurrentSchemaInspector`,
-`compute_column_diff`, the rename-resolution subgraph, confidence
-gating, human approval, apply, and verify are all exactly what
-`build_schema_repair_workflow` already wires up — this class only
-translates `PipelineError` -> initial state, runs the canonical
-workflow, and translates its `SchemaRepairResult` back into the
-`RepairResult` shape `ErrorRouter`/the CLI's cloud-integration step
-already understand, so no downstream code needs to know Tier 2 exists.
+Thin adapter between `ErrorRouter` and the `schema_repair_workflow`
+`StateGraph` plus its audited wrapper (`run_audited_schema_repair`),
+mirroring `LangGraphCsvRepairAgent`'s role for Tier 1. Translates
+`PipelineError` -> initial state, runs the workflow, and translates its
+`SchemaRepairResult` back into the `RepairResult` shape `ErrorRouter`
+and the CLI's cloud-integration step already understand.
 
-Status -> `RepairResult` mapping (deliberately mirrors Tier 1's own
-healthy/failure conventions so the exact same CLI branching applies to
-both tiers with no special-casing):
+Status -> `RepairResult` mapping (mirrors Tier 1's conventions so the
+same CLI branching applies to both tiers):
 
-- `HEALTHY` (no drift): `success=True, applied=False` — same shape
-  `LangGraphCsvRepairAgent` already returns for an already-healthy CSV.
-  The cloud-integration step is skipped, exactly as it already is for a
-  healthy Tier 1 file today.
-- `SUCCEEDED` (approved, applied, verified): `success=True,
-  applied=True, output_path=result.output_path`. Mirroring Tier 1
-  exactly, `PandasSchemaExecutor` never touches the source file: the
-  repaired file is written to a separate `repaired/<name>` path
-  alongside it, reported here as `output_path`.
-- `REJECTED` / `FAILED` / `INVALID` (including "no baseline found"):
-  `success=False, applied=False` — the cloud step is skipped and the
-  CLI exits non-zero, exactly as an unsuccessful Tier 1 repair already
-  does. No Azure upload or Databricks trigger can be reached from here.
+- `HEALTHY` (no drift): `success=True, applied=False` — cloud step
+  skipped, same as a healthy Tier 1 file.
+- `SUCCEEDED`: `success=True, applied=True,
+  output_path=result.output_path` — `PandasSchemaExecutor` never
+  touches the source; the repaired file goes to a separate
+  `repaired/<name>` path.
+- `REJECTED` / `FAILED` / `INVALID`: `success=False, applied=False` —
+  cloud step skipped, CLI exits non-zero.
 """
 
 from typing import Any

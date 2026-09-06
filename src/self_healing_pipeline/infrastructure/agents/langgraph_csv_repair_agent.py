@@ -1,22 +1,16 @@
 """LangGraph-backed `RepairAgent` — the canonical Tier 1 CSV repair handler.
 
 Thin adapter between `ErrorRouter` (which only knows the `RepairAgent`
-Protocol: `handle(error) -> RepairResult`) and the existing, unmodified
-`csv_repair_workflow` `StateGraph` plus its audited wrapper. It contains
-no repair logic of its own — it does not duplicate the LangGraph
-workflow, and it is not a second CSV repair implementation. Its entire
-job is: build the initial state for `error.file_path`, run the canonical
-workflow through `run_audited_csv_repair` (which drives PostgreSQL audit
-and best-effort MLflow tracking exactly as already implemented), and
-translate the resulting `CsvRepairWorkflowState` back into the
-`RepairResult` `ErrorRouter` expects.
+Protocol: `handle(error) -> RepairResult`) and the `csv_repair_workflow`
+`StateGraph` plus its audited wrapper. Builds the initial state for
+`error.file_path`, runs the workflow through `run_audited_csv_repair`
+(PostgreSQL audit, best-effort MLflow tracking), and translates the
+resulting `CsvRepairWorkflowState` back into `RepairResult`.
 
-Note: the workflow's own `diagnose` node independently re-detects the
-failure via `CsvFailureDetector` — it does not trust `error`'s type. This
-is intentional, not an oversight: `error` only tells us *that* something
-upstream believed there was a failure (and supplies `file_path`); the
-workflow's own diagnosis is the authoritative, up-to-date check, exactly
-as it is for every other caller of the workflow.
+Note: the workflow's `diagnose` node independently re-detects the
+failure via `CsvFailureDetector` rather than trusting `error`'s type —
+`error` only tells us something upstream believed there was a failure;
+the workflow's own diagnosis is the authoritative check.
 """
 
 from typing import Any

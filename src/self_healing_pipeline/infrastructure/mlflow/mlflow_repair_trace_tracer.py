@@ -4,9 +4,8 @@ Confined to infrastructure: no domain or application module imports
 mlflow directly for tracing. Uses MLflow's fluent tracing functions
 (`mlflow.start_span`, `mlflow.get_last_active_trace_id`,
 `mlflow.set_trace_tag`) rather than a constructor-injected `MlflowClient`
-— empirically verified (Ticket 013) that MLflow 3.15.1's tracing API is
-fluent/global-context based, unlike the Runs API `MlflowRepairRunTracker`
-uses.
+(Ticket 013) — MLflow's tracing API is fluent/global-context based,
+unlike the Runs API `MlflowRepairRunTracker` uses.
 
 Tracing is strictly best-effort and guarantees `invoke()` is called
 EXACTLY ONCE regardless of whether span creation, tagging, or trace-ID

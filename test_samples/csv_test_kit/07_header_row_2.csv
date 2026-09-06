@@ -1,0 +1,12 @@
+Weekly Sales Report - Generated 2024-01-15
+store_id,store_name,region,category,product_sku,product_name,week_ending,units_sold,retail_price,gross_sales,promo_flag
+S001,Tesco Extra - Manchester,North,Beverages,BEV-0042,Sparkling Mineral Water 1.5L,2024-01-07,312,1.89,589.68,N
+S001,Tesco Extra - Manchester,North,Beverages,BEV-0087,Orange Juice 1L,2024-01-07,204,2.49,507.96,Y
+S002,Sainsbury's - Birmingham,Midlands,Snacks,SNK-0015,Salted Crisps Multipack,2024-01-07,178,3.50,623.00,N
+S003,Waitrose - Café Nero,South,Beverages,BEV-0042,Sparkling Mineral Water 1.5L,2024-01-07,503,2.10,1056.30,N
+S003,Waitrose - Café Nero,South,Snacks,SNK-0021,Piñata Chocolate 100g,2024-01-07,290,3.75,1087.50,Y
+S004,Morrisons - Leeds,North,Beverages,BEV-0099,Cranberry Juice 1L,2024-01-14,188,2.79,524.52,Y
+S004,Morrisons - Leeds,North,Snacks,SNK-0021,Piñata Chocolate 100g,2024-01-14,530,1.20,636.00,N
+S005,Asda - Glasgow,Scotland,Beverages,BEV-0087,Orange Juice 1L,2024-01-14,274,2.25,616.50,Y
+S005,Asda - Glasgow,Scotland,Snacks,SNK-0015,Salted Crisps Multipack,2024-01-14,199,3.25,646.75,N
+S006,M&S Food Hall - London Bridge,South,Beverages,BEV-0099,Cranberry Juice 1L,2024-01-14,143,£2.79,398.97,N

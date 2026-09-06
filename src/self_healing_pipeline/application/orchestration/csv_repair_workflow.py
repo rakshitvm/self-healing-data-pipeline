@@ -1,82 +1,60 @@
 """Tier 1 CSV repair workflow: sample -> diagnose -> propose -> validate -> [human_approval] -> apply -> re-verify.
 
-A LangGraph `StateGraph` orchestrating the existing Tier 1 building blocks
+A LangGraph `StateGraph` orchestrating the Tier 1 building blocks
 (`CsvFailureDetector`, `CsvRepairExecutor`, and a provider-agnostic
-`CsvRepairProposalPort`) into a single self-healing workflow. This module
-is orchestration only: it contains no pandas, no filesystem repair logic,
-and no LLM-provider-specific code — every infrastructure concern is
-injected as one of the three ports above, and the only filesystem access
-here is the deterministic sampling tool, which reads (never writes) a few
-lines of the target file.
+`CsvRepairProposalPort`) into one self-healing workflow. Orchestration
+only — no pandas, no filesystem repair logic, no LLM-provider code; every
+infrastructure concern is injected via the three ports above. The only
+filesystem access here is the sampling tool, which reads (never writes)
+a few lines of the target file.
 
 Node responsibilities:
 
-- `prepare_sample_call` / the `sample_tool` `ToolNode` / `extract_sample`:
-  deterministically obtain a small sample of the CSV. No LLM call.
-- `diagnose`: delegate to `CsvFailureDetector`. No LLM call. If no Tier 1
-  failure is detected, the graph short-circuits straight to success
-  without ever invoking the proposal port. A single file can genuinely
-  exhibit more than one Tier 1 failure dimension at once (see
-  `LocalCsvFailureDetector.detect_all`) — `state["failure_classes"]`
-  holds the complete set, while `state["failure_class"]` keeps holding
-  the single backward-compatible primary value every other node already
-  relied on before multi-failure detection existed.
-- `propose`: the reasoning boundary. Delegates to `CsvRepairProposalPort`
-  and stores its *raw, unvalidated* output. For a multi-failure episode,
-  the sample is prefixed with a deterministic evidence line listing every
-  detected failure, so the LLM proposes one combined prescription instead
-  of fixing only the primary dimension. For `WRONG_ENCODING` (whether
-  alone or alongside other failures) specifically, a deterministic (no
-  LLM) `chardet` pass over the file's raw bytes additionally adds a
-  best-effort encoding hint to the *local* sample text — `state["sample"]`
-  itself is never altered. Because `encoding` is directly determined by
-  the file's actual bytes rather than a matter of judgment, when chardet
-  names one, that single field of the LLM's raw proposal is
-  deterministically corrected to match before the proposal is stored —
-  every other field (including whatever the LLM proposed for delimiter/
-  header_row/engine to address the *other* detected failures) remains
-  exactly what the LLM returned, so one failure's correction can never
-  overwrite another's required parameter. The (possibly-corrected) result
-  still flows through `validate` unchanged, so an invalid proposal still
-  never reaches `apply`.
-- `validate`: the only thing allowed to turn a raw proposal into a
-  `CsvRepairParams` that `apply` may use. An invalid proposal never
-  reaches `apply`.
-- `human_approval`: reached for every non-healthy repair — a healthy
-  file still short-circuits at `diagnose` and never reaches this node,
-  but any file with one or more detected failures now requires explicit
-  human approval before `apply`, regardless of whether it's a
-  single-failure or multi-failure episode. Delegates to the injected
-  `CsvHumanApprovalPort`; a rejection routes straight to `set_rejected`
-  and `apply` is never called. Omitting `approval_port` (the default) —
-  as a fail-safe — is treated as an automatic rejection whenever this
-  node is reached, so approval can never be silently bypassed.
+- `prepare_sample_call` / `sample_tool` / `extract_sample`: get a small
+  sample of the CSV, deterministically. No LLM call.
+- `diagnose`: delegate to `CsvFailureDetector`. No LLM call. A healthy
+  file short-circuits straight to success without invoking the proposal
+  port. A file can exhibit more than one failure dimension at once
+  (`LocalCsvFailureDetector.detect_all`) — `state["failure_classes"]`
+  holds the full set, `state["failure_class"]` keeps the single primary
+  value other nodes rely on.
+- `propose`: the reasoning boundary. Delegates to `CsvRepairProposalPort`,
+  stores its raw, unvalidated output. For a multi-failure episode, the
+  sample is prefixed with a line listing every detected failure so the
+  LLM proposes one combined prescription. Several fields are mechanical
+  once a failure is detected and are deterministically corrected after
+  the LLM call rather than left to it: `WRONG_ENCODING`'s `encoding`
+  (from a `chardet` pass over the raw bytes), `HEADER_DETECTION`'s
+  `header_row`, `NO_HEADER`'s `header_row=None`, and `MIXED_DELIMITER`'s
+  `delimiter`/`mixed_delimiter_rows`. Each correction only touches its
+  own field — the rest of the LLM's proposal passes through unchanged —
+  and the result still flows through `validate` before `apply`.
+  `INVISIBLE_CHARACTERS` needs no proposal-level correction: the fix is
+  unconditional column-name cleanup in the executor itself.
+- `validate`: the only place a raw proposal becomes a `CsvRepairParams`
+  `apply` may use.
+- `human_approval`: reached for every non-healthy repair, single- or
+  multi-failure. Delegates to the injected `CsvHumanApprovalPort`; a
+  rejection routes to `set_rejected`, `apply` is never called. No
+  `approval_port` configured means automatic rejection (fail-safe).
 - `apply`: delegates to `CsvRepairExecutor.execute` with the validated
-  prescription — no pandas logic is duplicated here. `execute` **never
-  modifies the source file** (`state["file_path"]`); on success it
-  writes a *separate* repaired output file and reports its path as
-  `state["output_path"]` / `RepairResult.output_path`.
-  `RepairResult.applied` is only ever `True` once that new file has
-  actually been written, never merely because the corrected prescription
-  parsed in memory. `MIXED_DELIMITER` is the one exception to "one
-  `CsvRepairParams`, one whole-file `pd.read_csv` call": when
-  `params.mixed_delimiter_rows` is non-empty, `apply`/`reverify`
-  delegate to the separately-injected `mixed_delimiter_executor`
-  instead — still just a `CsvRepairExecutor`, still selected purely by
-  data already on `params`, no new graph nodes or edges.
-- `reverify`: an independent, read-only check of the *repaired output*
-  file (`state["output_path"]`), via `CsvRepairExecutor.verify` — never
-  the source, and it never writes anything. If `apply` produced no
-  output (the prescription still didn't resolve the file, or the write
-  itself failed), `reverify` reports failure without touching any file.
-  No LLM call.
+  prescription. `execute` never modifies the source file; on success it
+  writes a separate repaired output and reports its path.
+  `RepairResult.applied` is only `True` once that file actually exists.
+  `MIXED_DELIMITER` prescriptions route to the separately-injected
+  `mixed_delimiter_executor` instead of the whole-file executor,
+  selected purely by data on `params` — no extra graph nodes/edges.
+- `reverify`: independent, read-only check of the repaired output via
+  `CsvRepairExecutor.verify` — never the source, never writes. If
+  `apply` produced no output, this reports failure without touching any
+  file. No LLM call.
 
-Retries are bounded by `max_retries` (checked before every retry) and are
-driven by two conditional edges (after `validate` and after `reverify`),
-both funnelling into a single `increment_retry` node before looping back
-to `propose` — there is no unconditional cycle in this graph.
+Retries are bounded by `max_retries`, driven by conditional edges after
+`validate` and `reverify`, both funnelling into `increment_retry` before
+looping back to `propose`.
 """
 
+import codecs
 from typing import Annotated, Any, TypedDict
 from uuid import UUID, uuid4
 
@@ -254,6 +232,38 @@ def _route_after_diagnose(state: CsvRepairWorkflowState) -> str:
     return "propose" if state["failure_class"] is not None else "healthy"
 
 
+# Single-byte Western/Central-European/Baltic codecs chardet tends to
+# confuse with one another at low confidence on short, mostly-ASCII
+# samples with only a handful of accented characters. A real Latin-1
+# file was misidentified as ISO-8859-4 (Baltic) at ~3.6% confidence,
+# corrupting `ñ` into `ņ` despite `chardet.detect` reporting success.
+# Multi-byte/CJK/Cyrillic encodings aren't part of this and are never
+# second-guessed here — they have far more distinctive byte patterns.
+_CONFUSABLE_WESTERN_SINGLE_BYTE_ENCODINGS = frozenset(
+    {
+        "iso88591",
+        "iso88592",
+        "iso88594",
+        "iso88599",
+        "iso885913",
+        "iso885915",
+        "iso885916",
+        "windows1250",
+        "windows1252",
+        "windows1254",
+        "windows1257",
+        "cp1252",
+        "macroman",
+    }
+)
+# Below this, chardet's specific single-byte-family guess isn't trusted
+# (see above), but a low-confidence guess still means the file isn't
+# plain UTF-8/ASCII — fall back to a safe, superset-compatible default
+# (Windows-1252) instead.
+_CHARDET_MIN_CONFIDENCE = 0.5
+_SAFE_WESTERN_FALLBACK_ENCODING = "cp1252"
+
+
 def _detect_encoding(file_path: str) -> chardet.DetectionDict | None:
     """Best-effort, deterministic byte-level encoding detection.
 
@@ -261,6 +271,13 @@ def _detect_encoding(file_path: str) -> chardet.DetectionDict | None:
     no randomness). Returns `None` on any I/O failure or when chardet
     can't name an encoding, so callers can always fall back gracefully
     without special-casing failure.
+
+    If chardet names a low-confidence,
+    `_CONFUSABLE_WESTERN_SINGLE_BYTE_ENCODINGS` guess, the returned
+    `"encoding"` is corrected to `_SAFE_WESTERN_FALLBACK_ENCODING`
+    instead (see the constants above for why) — `"confidence"` is left
+    exactly as chardet reported it, so callers displaying it as evidence
+    still show the real (low) number.
     """
     try:
         with open(file_path, "rb") as fh:
@@ -271,7 +288,33 @@ def _detect_encoding(file_path: str) -> chardet.DetectionDict | None:
 
     if detected["encoding"] is None:
         return None
+
+    # Canonicalize by stripping every non-alphanumeric character before
+    # comparing — chardet, Python's codec registry, and this module's
+    # own constants don't agree on hyphens/underscores (chardet itself
+    # returns `"iso8859-4"`, not `"ISO-8859-4"`), so an exact string
+    # match would silently never fire.
+    normalized = "".join(ch for ch in detected["encoding"].lower() if ch.isalnum())
+    if (
+        detected["confidence"] < _CHARDET_MIN_CONFIDENCE
+        and normalized in _CONFUSABLE_WESTERN_SINGLE_BYTE_ENCODINGS
+        and not _same_codec(detected["encoding"], _SAFE_WESTERN_FALLBACK_ENCODING)
+    ):
+        detected = {**detected, "encoding": _SAFE_WESTERN_FALLBACK_ENCODING}
+
     return detected
+
+
+def _same_codec(left: str, right: str) -> bool:
+    """`True` if `left` and `right` name the same underlying codec (e.g.
+    `"Windows-1252"` and `"cp1252"` are aliases for one identical codec)
+    — used so a low-confidence guess that's already functionally
+    equivalent to the safe fallback is left exactly as chardet reported
+    it, rather than being needlessly renamed."""
+    try:
+        return codecs.lookup(left).name == codecs.lookup(right).name
+    except LookupError:
+        return False
 
 
 def _make_propose_node(llm_port: CsvRepairProposalPort, detector: CsvFailureDetector) -> Any:
@@ -337,6 +380,29 @@ def _make_propose_node(llm_port: CsvRepairProposalPort, detector: CsvFailureDete
                         f"{evidence_lines}\n{sample}"
                     )
 
+        # HEADER_DETECTION evidence: the number of leading preamble lines
+        # to skip is computed deterministically over the WHOLE file (see
+        # `detect_header_offset_evidence`), never limited by the sample
+        # cap above — a multi-line preamble can push the real header
+        # beyond what a 5-line sample even shows the LLM.
+        header_offset: int | None = None
+        garbled_header_delimiter: str | None = None
+        garbled_header_repair: MixedDelimiterRowRepair | None = None
+        if FailureClass.HEADER_DETECTION in failure_classes:
+            detect_offset = getattr(detector, "detect_header_offset_evidence", None)
+            if callable(detect_offset):
+                header_offset = detect_offset(state["file_path"])
+            # The header line itself might be malformed by several
+            # different delimiter characters used interchangeably (e.g.
+            # `id;name|age,state,country`) rather than genuinely being
+            # junk to skip — see `detect_garbled_header_repair`. Also
+            # deterministic, never left to the LLM to guess.
+            detect_garbled = getattr(detector, "detect_garbled_header_repair", None)
+            if callable(detect_garbled):
+                garbled_result = detect_garbled(state["file_path"])
+                if garbled_result is not None:
+                    garbled_header_delimiter, garbled_header_repair = garbled_result
+
         raw = llm_port.propose(
             failure_class=failure_class,
             sample=sample,
@@ -358,6 +424,29 @@ def _make_propose_node(llm_port: CsvRepairProposalPort, detector: CsvFailureDete
                 "delimiter": established_delimiter,
                 "mixed_delimiter_rows": [r.model_dump() for r in mixed_delimiter_rows],
             }
+        if header_offset is not None and isinstance(raw, dict):
+            # Same override pattern: the correct header_row is
+            # deterministically known once HEADER_DETECTION fires, so the
+            # LLM's own guess (which may not even have seen the real
+            # header line, given the sample cap) is discarded.
+            raw = {**raw, "header_row": header_offset}
+        if garbled_header_repair is not None and isinstance(raw, dict):
+            # Same override pattern as MIXED_DELIMITER above: a header
+            # line using several delimiter characters interchangeably is
+            # exactly the kind of thing this project never lets the LLM
+            # guess. Independent of (and can fire alongside) the
+            # header_offset override above — one corrects *where* the
+            # header is, this corrects *what the header line says*.
+            raw = {
+                **raw,
+                "delimiter": garbled_header_delimiter,
+                "mixed_delimiter_rows": [garbled_header_repair.model_dump()],
+            }
+        if FailureClass.NO_HEADER in failure_classes and isinstance(raw, dict):
+            # Mechanical, not a judgment call: NO_HEADER means the file
+            # has no header row at all, so every row is data — never left
+            # to the LLM to guess.
+            raw = {**raw, "header_row": None}
 
         logger.info(
             "node_completed",
@@ -444,16 +533,11 @@ def _select_executor(
 ) -> tuple[CsvRepairExecutor, CsvExecutionOutcome | None]:
     """Pick which `CsvRepairExecutor` applies/verifies `params`.
 
-    `PandasCsvRepairExecutor` (the injected `executor`, used by every
-    other Tier 1 dimension) is never touched or given a
-    `mixed_delimiter_rows` prescription it wasn't designed for:
-    MIXED_DELIMITER routes to the separately-injected
-    `mixed_delimiter_executor` instead, selected purely by data already
-    on `params` — no new graph nodes or edges. If a MIXED_DELIMITER
-    prescription reaches here without one wired in, fail safe (an
-    unsuccessful outcome) rather than silently falling back to the
-    whole-file pandas executor, which cannot correctly apply per-row
-    exceptions.
+    A `mixed_delimiter_rows` prescription routes to the separately
+    injected `mixed_delimiter_executor` instead of the whole-file
+    `executor`, selected purely by data on `params`. If one reaches here
+    without an executor wired in, fail safe rather than falling back to
+    the whole-file executor, which can't apply per-row exceptions.
     """
     if not params.mixed_delimiter_rows:
         return executor, None
@@ -599,23 +683,16 @@ def build_csv_repair_workflow(
 ) -> CompiledStateGraph[CsvRepairWorkflowState, None, Any, Any]:
     """Build and compile the Tier 1 CSV repair `StateGraph`.
 
-    `approval_port` is consulted for every non-healthy repair (single- or
-    multi-failure alike) — `apply` is never reached without an explicit
-    approval. Omitting `approval_port` (the default) fails safe: any
-    repair that reaches the `human_approval` node without one wired in
-    is treated as rejected, never silently auto-applied.
+    `approval_port` is consulted for every non-healthy repair; `apply` is
+    never reached without an explicit approval. Omitting it fails safe:
+    a repair reaching `human_approval` without one is treated as
+    rejected.
 
     `detector`, `executor`, and `llm_port` are injected ports (Dependency
-    Inversion) — this function contains no pandas, filesystem repair, or
-    LLM-provider code of its own. `mixed_delimiter_executor` is a second,
-    optional `CsvRepairExecutor` used only for `MIXED_DELIMITER`
-    prescriptions (selected purely by data on `params`, see
-    `_select_executor`) — `executor` itself never receives a
-    `mixed_delimiter_rows` prescription. Omitting it (the default)
-    reproduces prior behavior exactly for every other failure class;
-    only a genuine `MIXED_DELIMITER` repair needs it, and fails safe
-    (rather than silently misapplying the whole-file `executor`) if it's
-    needed but wasn't provided.
+    Inversion). `mixed_delimiter_executor` is a second, optional
+    `CsvRepairExecutor` used only for `MIXED_DELIMITER` prescriptions
+    (see `_select_executor`); omitting it is a no-op for every other
+    failure class and fails safe if a `MIXED_DELIMITER` repair needs it.
     """
     graph = StateGraph(CsvRepairWorkflowState)
 

@@ -9,6 +9,7 @@ Tier 2 pattern exactly: the domain and application layers depend only on
 import click
 
 from self_healing_pipeline.domain.interfaces.services.csv_approval_port import CsvApprovalRequest
+from self_healing_pipeline.domain.value_objects.failure_class import FailureClass
 
 
 class ClickCsvHumanApprovalPort:
@@ -37,6 +38,20 @@ class ClickCsvHumanApprovalPort:
                 click.echo(f"Observed delimiter: {row.observed_delimiter}")
                 click.echo("Proposed repair:")
                 click.echo(f"  {row.original_text} -> {row.repaired_text}")
+
+        if FailureClass.NO_HEADER in request.failure_classes:
+            click.echo("")
+            click.echo(
+                "No header row detected; every row will be treated as data "
+                "(columns get default integer names)."
+            )
+
+        if FailureClass.INVISIBLE_CHARACTERS in request.failure_classes:
+            click.echo("")
+            click.echo(
+                "Invisible/BOM characters detected in the header row; they "
+                "will be stripped from the repaired output's column names."
+            )
 
         click.echo("")
 
